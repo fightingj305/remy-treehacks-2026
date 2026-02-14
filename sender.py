@@ -8,6 +8,7 @@ Usage:
 """
 
 import argparse
+import io
 import socket
 import struct
 import time
@@ -26,7 +27,7 @@ class UDPOutput(FileOutput):
     prefixed with a 4-byte big-endian length header."""
 
     def __init__(self, sock, dest):
-        super().__init__(sock)
+        super().__init__(io.BytesIO())
         self.sock = sock
         self.dest = dest
 

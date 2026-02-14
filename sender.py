@@ -1,14 +1,13 @@
 """
 sender.py — Runs on the Camera RPi.
 Captures video from the RPi camera and streams MJPEG frames
-over TCP to the base station.
+over UDP to the base station.
 
 Usage:
     python3 sender.py --host <BASE_STATION_IP> --port 9000
 """
 
 import argparse
-import io
 import socket
 import struct
 import time
@@ -18,20 +17,27 @@ from picamera2.encoders import MJPEGEncoder
 from picamera2.outputs import FileOutput
 
 
-class SocketOutput(FileOutput):
-    """Custom output that sends each JPEG frame over a TCP socket,
+# Max safe UDP payload (65535 - 20 IP header - 8 UDP header - 4 our header)
+MAX_UDP_PAYLOAD = 65503
+
+
+class UDPOutput(FileOutput):
+    """Custom output that sends each JPEG frame as a UDP datagram,
     prefixed with a 4-byte big-endian length header."""
 
-    def __init__(self, conn):
-        super().__init__(conn)
-        self.conn = conn
+    def __init__(self, sock, dest):
+        super().__init__(sock)
+        self.sock = sock
+        self.dest = dest
 
     def outputframe(self, frame, keyframe=True, timestamp=None):
+        if len(frame) > MAX_UDP_PAYLOAD:
+            return  # skip frames too large for a single datagram
         try:
             header = struct.pack(">I", len(frame))
-            self.conn.sendall(header + frame)
-        except (BrokenPipeError, ConnectionResetError):
-            raise
+            self.sock.sendto(header + frame, self.dest)
+        except OSError:
+            pass  # drop frame silently on any send error
 
 
 def start_streaming(host, port, width, height, fps):
@@ -42,35 +48,27 @@ def start_streaming(host, port, width, height, fps):
     )
     picam2.configure(video_config)
 
-    while True:
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        print(f"Connecting to base station at {host}:{port} ...")
-        try:
-            sock.connect((host, port))
-        except ConnectionRefusedError:
-            print("  Base station not ready, retrying in 2s ...")
-            sock.close()
-            time.sleep(2)
-            continue
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 4 * 1024 * 1024)
+    dest = (host, port)
 
-        print("Connected! Streaming ...")
+    print(f"Streaming UDP to {host}:{port} ({width}x{height} @ {fps}fps) ...")
+
+    while True:
         try:
             encoder = MJPEGEncoder()
-            output = SocketOutput(sock)
+            output = UDPOutput(sock, dest)
             picam2.start_recording(encoder, output)
 
-            # Keep streaming until the connection drops
             while True:
                 time.sleep(1)
 
-        except (BrokenPipeError, ConnectionResetError, OSError) as e:
-            print(f"Connection lost ({e}). Reconnecting ...")
-        finally:
+        except Exception as e:
+            print(f"Error ({e}). Restarting encoder ...")
             try:
                 picam2.stop_recording()
             except Exception:
                 pass
-            sock.close()
             time.sleep(1)
 
 

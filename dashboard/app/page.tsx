@@ -83,12 +83,11 @@ export default function Dashboard() {
           }
         ]
       };
-
-      fetch('https://172.20.10.13:8080/api/chat', { // Added :8080 based on your docs
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
-      })
+      fetch('/api/send-task', { 
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        })
         .then((res) => {
           if (!res.ok) throw new Error(`HTTP ${res.status}`);
           return res.json();

@@ -4,6 +4,7 @@ import { useState } from 'react';
 import PreferencesModal from '@/components/PreferencesModal';
 import CookingInput from '@/components/CookingInput';
 import RecommendationsGrid, { Recommendation } from '@/components/RecommendationsGrid';
+import Toast from '@/components/Toast';
 
 export default function Dashboard() {
   const [isPreferencesModalOpen, setIsPreferencesModalOpen] = useState(false);
@@ -18,6 +19,7 @@ export default function Dashboard() {
   const [error, setError] = useState<string | null>(null);
   const [isDarkMode, setIsDarkMode] = useState(false);
   const [playingCardId, setPlayingCardId] = useState<number | null>(null);
+  const [toastMessage, setToastMessage] = useState<string | null>(null);
 
   const handleSavePreferences = (preferences: string[]) => {
     setUserPreferences(preferences);
@@ -80,10 +82,17 @@ export default function Dashboard() {
     })
       .then((res) => res.json())
       .then((data) => {
-        if (data.error) console.error('Send failed:', data.error);
-        else console.log('Task queue sent for:', item.name);
+        if (data.error) {
+          console.error('Send failed:', data.error);
+          setToastMessage(`Failed to send recipe: ${data.error}`);
+        } else {
+          console.log('Task queue sent for:', item.name);
+        }
       })
-      .catch((err) => console.error('Send error:', err));
+      .catch((err) => {
+        console.error('Send error:', err);
+        setToastMessage('Failed to connect to cooking device');
+      });
   };
 
   return (
@@ -145,6 +154,10 @@ export default function Dashboard() {
           onCook={handleCook}
         />
       </main>
+
+      {toastMessage && (
+        <Toast message={toastMessage} onDismiss={() => setToastMessage(null)} />
+      )}
 
       <PreferencesModal
         isOpen={isPreferencesModalOpen}

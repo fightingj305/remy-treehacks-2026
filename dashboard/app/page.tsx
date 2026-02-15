@@ -68,32 +68,39 @@ export default function Dashboard() {
       setIsLoading(false);
     }
   };
-
   const handleCook = (item: Recommendation) => {
-    console.log(`Sending recipe to 172.20.10.13 →`, item.recipeTaskQueue);
-    fetch('http://172.20.10.13/api/chat', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        steps: item.recipeTaskQueue,
-        recipeName: item.name,
-      }),
-    })
-      .then((res) => {
-        if (!res.ok) {
-          throw new Error(`HTTP ${res.status}: ${res.statusText}`);
-        }
-        return res.json();
+      console.log(`Sending recipe to 172.20.10.13:8080 →`, item.recipeTaskQueue);
+      
+      // Construct the payload to match your server's expected schema
+      const payload = {
+        message: `Cooking ${item.name}`,
+        recommendations: [
+          {
+            name: item.name,
+            imageUrl: item.imageUrl,
+            description: item.description,
+            recipeTaskQueue: item.recipeTaskQueue, // This is what the server extracts
+          }
+        ]
+      };
+
+      fetch('http://172.20.10.13:8080/api/chat', { // Added :8080 based on your docs
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
       })
-      .then((data) => {
-        console.log('Recipe sent successfully:', item.name);
-        setToastMessage(`Sent recipe: ${item.name}`);
-      })
-      .catch((err) => {
-        console.error('Send error:', err);
-        setToastMessage(`Failed to send recipe: ${err.message}`);
-      });
-  };
+        .then((res) => {
+          if (!res.ok) throw new Error(`HTTP ${res.status}`);
+          return res.json();
+        })
+        .then((data) => {
+          setToastMessage(`Sent recipe: ${item.name}`);
+        })
+        .catch((err) => {
+          console.error('Send error:', err);
+          setToastMessage(`Failed to send recipe: ${err.message}`);
+        });
+    };
 
   return (
     <div

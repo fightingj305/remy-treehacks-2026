@@ -84,7 +84,7 @@ export default function Dashboard() {
         ]
       };
 
-      fetch('http://172.20.10.13:8080/api/chat', { // Added :8080 based on your docs
+      fetch('https://172.20.10.13:8080/api/chat', { // Added :8080 based on your docs
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),

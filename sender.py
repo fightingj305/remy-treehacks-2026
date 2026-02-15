@@ -1,53 +1,31 @@
 """
 sender.py — Runs on the Camera RPi.
-Captures video from the RPi camera and streams MJPEG frames
-over UDP to the base station.
+Captures video from a USB webcam (e.g. Logitech Brio) and streams
+MJPEG frames over UDP to the base station.
 
 Usage:
     python3 sender.py --host <BASE_STATION_IP> --port 9000
 """
 
 import argparse
-import io
 import socket
 import struct
 import time
 
-from picamera2 import Picamera2
-from picamera2.encoders import MJPEGEncoder
-from picamera2.outputs import FileOutput
-
+import cv2
 
 # Max safe UDP payload (65535 - 20 IP header - 8 UDP header - 4 our header)
 MAX_UDP_PAYLOAD = 65503
 
 
-class UDPOutput(FileOutput):
-    """Custom output that sends each JPEG frame as a UDP datagram,
-    prefixed with a 4-byte big-endian length header."""
-
-    def __init__(self, sock, dest):
-        super().__init__(io.BytesIO())
-        self.sock = sock
-        self.dest = dest
-
-    def outputframe(self, frame, keyframe=True, timestamp=None):
-        if len(frame) > MAX_UDP_PAYLOAD:
-            return  # skip frames too large for a single datagram
-        try:
-            header = struct.pack(">I", len(frame))
-            self.sock.sendto(header + frame, self.dest)
-        except OSError:
-            pass  # drop frame silently on any send error
-
-
 def start_streaming(host, port, width, height, fps):
-    picam2 = Picamera2()
-    video_config = picam2.create_video_configuration(
-        main={"size": (width, height), "format": "RGB888"},
-        controls={"FrameRate": fps},
-    )
-    picam2.configure(video_config)
+    cap = cv2.VideoCapture(0)
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
+    cap.set(cv2.CAP_PROP_FPS, fps)
+
+    if not cap.isOpened():
+        raise RuntimeError("Could not open webcam")
 
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 4 * 1024 * 1024)
@@ -55,22 +33,37 @@ def start_streaming(host, port, width, height, fps):
 
     print(f"Streaming UDP to {host}:{port} ({width}x{height} @ {fps}fps) ...")
 
-    while True:
-        try:
-            encoder = MJPEGEncoder()
-            output = UDPOutput(sock, dest)
-            picam2.start_recording(encoder, output)
+    encode_params = [cv2.IMWRITE_JPEG_QUALITY, 80]
+    frame_interval = 1.0 / fps
 
-            while True:
-                time.sleep(1)
+    try:
+        while True:
+            t0 = time.monotonic()
+            ret, frame = cap.read()
+            if not ret:
+                continue
 
-        except Exception as e:
-            print(f"Error ({e}). Restarting encoder ...")
+            ok, jpeg = cv2.imencode(".jpg", frame, encode_params)
+            if not ok:
+                continue
+
+            data = jpeg.tobytes()
+            if len(data) > MAX_UDP_PAYLOAD:
+                continue  # skip oversized frames
+
+            header = struct.pack(">I", len(data))
             try:
-                picam2.stop_recording()
-            except Exception:
+                sock.sendto(header + data, dest)
+            except OSError:
                 pass
-            time.sleep(1)
+
+            elapsed = time.monotonic() - t0
+            sleep_time = frame_interval - elapsed
+            if sleep_time > 0:
+                time.sleep(sleep_time)
+    finally:
+        cap.release()
+        sock.close()
 
 
 def main():

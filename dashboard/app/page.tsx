@@ -70,13 +70,13 @@ export default function Dashboard() {
   };
 
   const handleCook = (item: Recommendation) => {
-    console.log(`Sending recipeTaskQueue to 100.71.232.77:9005 →`, item.recipeTaskQueue);
+    console.log(`Sending recipeTaskQueue to 172.20.10.13:9005 →`, item.recipeTaskQueue);
     fetch('/api/send-task', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         recipeTaskQueue: item.recipeTaskQueue,
-        host: '100.71.232.77',
+        host: '172.20.10.13',
         port: 9005,
       }),
     })

@@ -21,6 +21,8 @@ export default function Dashboard() {
   const [recommendations, setRecommendations] = useState<Recommendation[]>([]);
   const [isLoading, setIsLoading] = useState(false);
   const [aiMessage, setAiMessage] = useState('');
+  const [error, setError] = useState<string | null>(null);
+  const [isDarkMode, setIsDarkMode] = useState(false);
 
   // Typing animation states
   const [placeholderText, setPlaceholderText] = useState('');
@@ -89,6 +91,7 @@ export default function Dashboard() {
     if (!userInput.trim() || isLoading) return;
 
     setIsLoading(true);
+    setError(null); // Clear any previous errors
     try {
       const response = await fetch('/api/chat', {
         method: 'POST',
@@ -102,7 +105,8 @@ export default function Dashboard() {
       });
 
       if (!response.ok) {
-        throw new Error('Failed to get recommendations');
+        const errorData = await response.json().catch(() => ({}));
+        throw new Error(errorData.error || `Server error: ${response.status}`);
       }
 
       const data = await response.json();
@@ -125,14 +129,19 @@ export default function Dashboard() {
       setUserInput('');
     } catch (error) {
       console.error('Error getting recommendations:', error);
-      // TODO: Show error message to user
+      setError(error instanceof Error ? error.message : 'Failed to get recommendations. Please try again.');
     } finally {
       setIsLoading(false);
     }
   };
 
   return (
-    <div className="min-h-screen bg-gray-50">
+    <div
+      className="min-h-screen transition-colors duration-300"
+      style={{
+        backgroundColor: isDarkMode ? '#23231F' : 'rgb(249, 250, 251)',
+      }}
+    >
       <main className={`max-w-4xl mx-auto px-6 flex flex-col ${
         recommendations.length === 0 && !isLoading
           ? 'py-12 justify-center min-h-screen'
@@ -141,27 +150,50 @@ export default function Dashboard() {
         {/* Logo */}
         <div className="mb-8 flex justify-center">
           <img
-            src="/images/remy_logo.svg"
+            src={isDarkMode ? '/images/remy_logo_dark.svg' : '/images/remy_logo.svg'}
             alt="Logo"
-            className="object-contain"
-            style={{ height: '100px' }}
+            className="object-contain cursor-pointer transition-all"
+            style={{
+              height: '100px',
+              filter: 'drop-shadow(0 0 0px rgba(175, 67, 29, 0))',
+            }}
+            onMouseEnter={(e) => {
+              e.currentTarget.style.filter = 'drop-shadow(0 0 20px rgba(175, 67, 29, 0.8))';
+            }}
+            onMouseLeave={(e) => {
+              e.currentTarget.style.filter = 'drop-shadow(0 0 0px rgba(175, 67, 29, 0))';
+            }}
+            onClick={() => setIsDarkMode(!isDarkMode)}
           />
         </div>
 
         {/* Greeting */}
-        <p className="text-gray-600 mb-2 text-lg">hello Allen</p>
-        <h1 className="text-4xl font-semibold mb-8">
+        <p className={`mb-2 text-lg transition-colors ${
+          isDarkMode ? 'text-gray-400' : 'text-gray-600'
+        }`}>hello Allen</p>
+        <h1 className={`text-4xl font-semibold mb-8 transition-colors ${
+          isDarkMode ? 'text-white' : 'text-gray-900'
+        }`}>
           What do you wish to cook?
         </h1>
 
         {/* Input Box */}
-        <div className="bg-white rounded-2xl p-6 shadow-sm border border-gray-200 mb-8">
+        <div
+          className={`rounded-2xl p-6 shadow-sm border mb-8 transition-colors ${
+            isDarkMode ? 'border-gray-700' : 'border-gray-200'
+          }`}
+          style={{
+            backgroundColor: isDarkMode ? '#2f2f2a' : 'white',
+          }}
+        >
           <div className="flex items-center gap-4 mb-6">
             {/* Text Input */}
             <div className="flex-1 relative">
               {userInput === '' && (
                 <div className="absolute top-0 left-0 flex items-start pt-1 pointer-events-none">
-                  <span className="text-lg text-gray-400">
+                  <span className={`text-lg transition-colors ${
+                    isDarkMode ? 'text-gray-500' : 'text-gray-400'
+                  }`}>
                     {placeholderText}<span className="animate-blink">|</span>
                   </span>
                 </div>
@@ -175,7 +207,9 @@ export default function Dashboard() {
                     handleSubmit();
                   }
                 }}
-                className="w-full text-lg text-black outline-none bg-transparent resize-none overflow-y-auto"
+                className={`w-full text-lg outline-none bg-transparent resize-none overflow-y-auto transition-colors ${
+                  isDarkMode ? 'text-white' : 'text-black'
+                }`}
                 style={{
                   height: 'calc(1.5rem * 1.5 * 2)', // Fixed 2 lines (font-size * line-height * lines)
                   lineHeight: '1.5',
@@ -224,9 +258,15 @@ export default function Dashboard() {
           {/* Preferences */}
           <div>
             <div className="flex items-center gap-2 mb-4">
-              <h2 className="text-sm text-gray-600 uppercase font-medium">PREFERENCES</h2>
+              <h2 className={`text-sm uppercase font-medium transition-colors ${
+                isDarkMode ? 'text-gray-400' : 'text-gray-600'
+              }`}>PREFERENCES</h2>
               <button
-                className="p-1 rounded hover:bg-gray-200 transition-colors text-gray-600 hover:text-gray-900"
+                className={`p-1 rounded transition-colors ${
+                  isDarkMode
+                    ? 'text-gray-400 hover:bg-gray-700 hover:text-gray-200'
+                    : 'text-gray-600 hover:bg-gray-200 hover:text-gray-900'
+                }`}
                 onClick={() => setIsPreferencesModalOpen(true)}
                 aria-label="Edit preferences"
               >
@@ -267,7 +307,9 @@ export default function Dashboard() {
         {/* Recommendations - Only show when there are recommendations or loading */}
         {(recommendations.length > 0 || isLoading) && (
           <div>
-            <h2 className="text-sm text-gray-600 mb-4 uppercase font-medium">RECOMMENDATIONS</h2>
+            <h2 className={`text-sm mb-4 uppercase font-medium transition-colors ${
+              isDarkMode ? 'text-gray-400' : 'text-gray-600'
+            }`}>RECOMMENDATIONS</h2>
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
               {isLoading ? (
                 // Show loading skeletons while fetching recommendations
@@ -298,6 +340,7 @@ export default function Dashboard() {
         onClose={() => setIsPreferencesModalOpen(false)}
         onSave={handleSavePreferences}
         initialPreferences={userPreferences}
+        isDarkMode={isDarkMode}
       />
     </div>
   );

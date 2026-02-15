@@ -39,6 +39,17 @@ python3 sender.py --host <BASE_STATION_IP> --port 9000
 
 Press `q` in the receiver's display window to quit.
 
+## DS18B20 Temperature Sensor
+
+- **ds18b20.py**: Reads temperature from a DS18B20 sensor over the 1-Wire bus on BCM GPIO 17 (physical pin 11).
+- Uses kernel modules `w1-gpio` and `w1-therm` via sysfs (`/sys/bus/w1/devices/28-*/w1_slave`).
+- Wiring: data pin → physical pin 11 (BCM 17), 4.7kΩ pull-up to 3.3V.
+- Requires `dtoverlay=w1-gpio,gpiopin=17` in `/boot/config.txt` for persistent boot config.
+
+```bash
+sudo python3 ds18b20.py
+```
+
 ## Platform
 
 Target hardware is Raspberry Pi (ARM/Linux). The sender requires a connected RPi camera module. The receiver requires a display (monitor, VNC, or X forwarding) for the OpenCV window.

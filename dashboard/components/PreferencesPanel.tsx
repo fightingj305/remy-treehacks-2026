@@ -34,7 +34,7 @@ export default function PreferencesPanel({ preferences, onEdit }: PreferencesPan
         {items.map((item) => (
           <div
             key={item.id}
-            className="bg-gray-100 rounded-2xl p-8 h-40 flex items-center justify-center hover:bg-gray-200 transition-colors"
+            className="bg-gray-100 rounded-2xl p-8 h-40 flex items-center justify-center hover:bg-gray-200 hover:shadow-lg transition-all cursor-pointer"
           >
             <span className="text-xl">{item.label}</span>
           </div>

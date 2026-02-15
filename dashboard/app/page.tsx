@@ -8,7 +8,7 @@ import PreviousDishes from '@/components/PreviousDishes';
 
 export default function Dashboard() {
   return (
-    <div className="flex min-h-screen bg-white">
+    <div className="flex min-h-screen">
       {/* Sidebar */}
       <Sidebar />
 

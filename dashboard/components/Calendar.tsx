@@ -72,7 +72,7 @@ export default function Calendar({ highlightedDates = [9, 13], onDateClick }: Ca
             key={day}
             className={`py-2 rounded-lg transition-colors ${
               highlightedDates.includes(day)
-                ? 'bg-gray-900 text-white'
+                ? 'bg-[#212121] text-white'
                 : 'text-gray-700 hover:bg-gray-100'
             }`}
             onClick={() => onDateClick?.(day)}

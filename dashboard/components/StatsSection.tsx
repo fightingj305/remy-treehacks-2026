@@ -12,7 +12,7 @@ interface StatsSectionProps {
 }
 
 export default function StatsSection({ stats, period = 'February' }: StatsSectionProps) {
-  const defaultStats = [
+  const defaultStats: Stat[] = [
     { id: 1, label: 'Avg. Calorie Intake' },
     { id: 2, label: 'Food Waste Reduction' },
   ];
@@ -29,7 +29,7 @@ export default function StatsSection({ stats, period = 'February' }: StatsSectio
         {items.map((item) => (
           <div
             key={item.id}
-            className="bg-gray-100 rounded-2xl p-8 h-64 flex items-center justify-center hover:bg-gray-200 transition-colors"
+            className="bg-gray-100 rounded-2xl p-8 h-64 flex items-center justify-center hover:bg-gray-200 hover:shadow-lg transition-all cursor-pointer"
           >
             <div className="text-center">
               <span className="text-xl block">{item.label}</span>

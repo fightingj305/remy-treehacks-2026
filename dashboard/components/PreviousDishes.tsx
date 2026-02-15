@@ -18,17 +18,17 @@ export default function PreviousDishes({ dishes }: PreviousDishesProps) {
     {
       id: 1,
       name: 'Spaghetti',
-      imageUrl: '/images/dishes/spaghetti.jpg',
+      imageUrl: '/images/dishes/spaghetti.png',
     },
     {
       id: 2,
       name: 'Egg Spam Fried Rice',
-      imageUrl: '/images/dishes/egg-spam-fried-rice.jpg',
+      imageUrl: '/images/dishes/egg-veggie-bowl.png',
     },
     {
       id: 3,
       name: 'KBBQ Beef',
-      imageUrl: '/images/dishes/kbbq-beef.jpg',
+      imageUrl: '/images/dishes/kbbq-beef.png',
     },
   ];
 
@@ -57,8 +57,24 @@ export default function PreviousDishes({ dishes }: PreviousDishesProps) {
                 backgroundColor: '#ccc',
               }}
             >
-              {/* Dark overlay for text readability */}
-              <div className="absolute inset-0 bg-black bg-opacity-40"></div>
+              {/* Progressive blur overlay */}
+              <div
+                className="absolute inset-0"
+                style={{
+                  backdropFilter: 'blur(6px)',
+                  WebkitBackdropFilter: 'blur(6px)',
+                  maskImage: 'linear-gradient(to bottom, rgba(0, 0, 0, 1), rgba(0, 0, 0, 0))',
+                  WebkitMaskImage: 'linear-gradient(to bottom, rgba(0, 0, 0, 1), rgba(0, 0, 0, 0))',
+                }}
+              ></div>
+
+              {/* Dark gradient overlay for text readability */}
+              <div
+                className="absolute inset-0"
+                style={{
+                  background: 'linear-gradient(to bottom, rgba(0, 0, 0, 0.7), rgba(0, 0, 0, 0.3))',
+                }}
+              ></div>
 
               {/* Meal name */}
               <h3 className="relative z-10 text-white text-xl font-medium text-center px-4">

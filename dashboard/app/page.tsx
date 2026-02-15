@@ -70,28 +70,28 @@ export default function Dashboard() {
   };
 
   const handleCook = (item: Recommendation) => {
-    console.log(`Sending recipeTaskQueue to 100.71.232.77:9005 →`, item.recipeTaskQueue);
-    fetch('/api/send-task', {
+    console.log(`Sending recipe to 172.20.10.13 →`, item.recipeTaskQueue);
+    fetch('http://172.20.10.13/api/chat', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        recipeTaskQueue: item.recipeTaskQueue,
-        host: '100.71.232.77',
-        port: 9005,
+        steps: item.recipeTaskQueue,
+        recipeName: item.name,
       }),
     })
-      .then((res) => res.json())
-      .then((data) => {
-        if (data.error) {
-          console.error('Send failed:', data.error);
-          setToastMessage(`Failed to send recipe: ${data.error}`);
-        } else {
-          console.log('Task queue sent for:', item.name);
+      .then((res) => {
+        if (!res.ok) {
+          throw new Error(`HTTP ${res.status}: ${res.statusText}`);
         }
+        return res.json();
+      })
+      .then((data) => {
+        console.log('Recipe sent successfully:', item.name);
+        setToastMessage(`Sent recipe: ${item.name}`);
       })
       .catch((err) => {
         console.error('Send error:', err);
-        setToastMessage('Failed to connect to cooking device');
+        setToastMessage(`Failed to send recipe: ${err.message}`);
       });
   };
 

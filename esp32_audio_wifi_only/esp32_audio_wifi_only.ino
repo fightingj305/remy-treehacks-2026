@@ -31,13 +31,13 @@ uint8_t udpBuffer[UDP_BUFFER_SIZE];       // for incoming audio
 int16_t micBuffer[512];                   // for sending mic audio
 
 // --- Ring Buffer ---
-#define RING_BUFFER_SIZE 8192  // Adjust size as needed (bigger = more latency but smoother)
+#define RING_BUFFER_SIZE 16384  // Adjust size as needed (bigger = more latency but smoother)
 uint8_t ringBuffer[RING_BUFFER_SIZE];
 volatile uint16_t writeIndex = 0;
 volatile uint16_t readIndex = 0;
 volatile uint16_t bufferLevel = 0;
 
-#define PREBUFFER_SIZE 2048  // Wait for this much data before starting playback
+#define PREBUFFER_SIZE RING_BUFFER_SIZE / 4  // Wait for this much data before starting playback
 
 bool isPlaying = false;
 

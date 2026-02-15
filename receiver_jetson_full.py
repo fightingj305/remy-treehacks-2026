@@ -16,10 +16,12 @@ Usage:
 """
 
 import argparse
+import base64
 import glob as globmod
 import io
 import json
 import os
+from http.server import HTTPServer, BaseHTTPRequestHandler
 import socket
 import struct
 import subprocess
@@ -48,9 +50,9 @@ load_dotenv()
 
 # Display size for each panel — sized to fit 800x480 DSI display
 DISPLAY_W = 380
-DISPLAY_H = 200
+DISPLAY_H = 140
 MAX_UDP_RECV = 65535
-VLM_LOG_LINES = 8
+VLM_LOG_LINES = 4
 
 # Audio constants
 AUDIO_RATE = 44100        # Sample rate from ESP32
@@ -85,6 +87,19 @@ TTS_FRAMES_PER_PACKET = TTS_MAX_PACKET_SIZE // (AUDIO_SAMPLE_WIDTH * 2)  # stere
 
 # Recipe TCP server
 RECIPE_PORT = 9005
+
+# HTTP API server
+HTTP_PORT = 8080
+
+# Step completion checker (Claude-based)
+STEP_CHECK_SYSTEM = (
+    "You are a kitchen task tracker. Given visual observations from a kitchen "
+    "camera and a list of recipe steps, determine which steps appear to be "
+    "completed based on the visual evidence. Return ONLY valid JSON with no "
+    "markdown formatting: {\"completed\": [0, 2, 3]} where values are "
+    "0-indexed step numbers. If no steps are completed, return "
+    "{\"completed\": []}."
+)
 
 # ---------------------------------------------------------------------------
 # DS18B20 temperature sensor helpers
@@ -157,6 +172,66 @@ def resample_audio(audio_44k, up=160, down=441):
 
 
 # ---------------------------------------------------------------------------
+# HTTP handler factory
+# ---------------------------------------------------------------------------
+
+def _step_to_string(step):
+    """Convert a recipeTaskQueue item to a display string."""
+    if isinstance(step, str):
+        return step
+    if isinstance(step, dict):
+        for key in ('step', 'description', 'instruction', 'text', 'name'):
+            if key in step:
+                return str(step[key])
+        return json.dumps(step)
+    return str(step)
+
+
+def _make_http_handler(app):
+    """Create an HTTP request handler class bound to the given app."""
+
+    class Handler(BaseHTTPRequestHandler):
+        def _send_json(self, code, obj):
+            self.send_response(code)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Access-Control-Allow-Origin', '*')
+            self.end_headers()
+            self.wfile.write(json.dumps(obj).encode())
+
+        def do_POST(self):
+            try:
+                print(f"[HTTP] {self.command} {self.path}")
+                # Accept any path — gateway may not use /api/chat exactly
+                content_length = int(self.headers.get('Content-Length') or 0)
+                body = self.rfile.read(content_length)
+                print(f"[HTTP] Body ({len(body)} bytes): {body[:500]}")
+                data = json.loads(body.decode('utf-8'))
+                app._handle_chat_post(data)
+                self._send_json(200, {"status": "ok"})
+            except json.JSONDecodeError as e:
+                print(f"[HTTP] JSON parse error: {e}")
+                self._send_json(400, {"error": f"Invalid JSON: {e}"})
+            except Exception as e:
+                print(f"[HTTP] Error handling POST: {e}")
+                import traceback
+                traceback.print_exc()
+                self._send_json(500, {"error": str(e)})
+
+        def do_OPTIONS(self):
+            self.send_response(200)
+            self.send_header('Access-Control-Allow-Origin', '*')
+            self.send_header('Access-Control-Allow-Methods',
+                             'POST, GET, OPTIONS')
+            self.send_header('Access-Control-Allow-Headers', 'Content-Type')
+            self.end_headers()
+
+        def log_message(self, format, *args):
+            pass  # suppress default HTTP logging
+
+    return Handler
+
+
+# ---------------------------------------------------------------------------
 # GUI Application
 # ---------------------------------------------------------------------------
 
@@ -202,8 +277,15 @@ class ReceiverJetsonFullApp:
         else:
             print("DS18B20 sensor not found — temperature display disabled")
 
+        # Mute state (suppresses TTS output to ESP32)
+        self._muted = False
+
+        # Experience gate — nothing runs (no Jetson fwd, no audio, no VLM)
+        # until a recipe arrives or user clicks "Start Without Recipe"
+        self._experience_started = False
+
         # Voice AI state
-        self._voice_state = "Listening"
+        self._voice_state = "Waiting for recipe..."
         self._voice_lock = threading.Lock()
         self._last_speak_end = 0.0  # monotonic timestamp of last TTS finish
         self._speak_cooldown = 7.0  # seconds to ignore VAD after speaking
@@ -221,10 +303,13 @@ class ReceiverJetsonFullApp:
         self._tts_sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF,
                                   4 * 1024 * 1024)
 
-        # Recipe steps state
+        # Recipe steps state (shared by TCP recipe handler + HTTP /api/chat)
         self._recipe_steps = []
         self._recipe_lock = threading.Lock()
-        self._recipe_rendered_count = 0
+        self._task_completed = []
+        self._task_queue_updated = False
+        self._task_completion_dirty = False
+        self._step_check_in_progress = False
 
         # Socket for forwarding to Jetson
         self._fwd_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -263,61 +348,87 @@ class ReceiverJetsonFullApp:
         threading.Thread(target=self._vlm_recv_loop, daemon=True).start()
         threading.Thread(target=self._audio_recv_loop, daemon=True).start()
         threading.Thread(target=self._recipe_tcp_loop, daemon=True).start()
+        threading.Thread(target=self._http_server_loop, daemon=True).start()
         if self._sensor_path:
             threading.Thread(target=self._temp_poll_loop, daemon=True).start()
 
+    def _recv_exactly(self, conn, n):
+        """Read exactly *n* bytes from a TCP socket, or return None on EOF."""
+        buf = b''
+        while len(buf) < n:
+            chunk = conn.recv(n - len(buf))
+            if not chunk:
+                return None
+            buf += chunk
+        return buf
+
     def _camera_recv_loop(self):
-        """Receive camera frames on --port, decode for display, forward to Jetson."""
-        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4 * 1024 * 1024)
-        sock.bind(("0.0.0.0", self.args.port))
-        print(f"Listening for camera on UDP port {self.args.port} ...")
+        """Accept a TCP connection from the sender and receive camera frames."""
+        server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        server.bind(("0.0.0.0", self.args.port))
+        server.listen(1)
+        server.settimeout(1.0)
+        print(f"Listening for camera on TCP port {self.args.port} ...")
 
         while self.running:
-            sock.settimeout(1.0)
+            # Accept a connection from the sender
             try:
-                data, addr = sock.recvfrom(MAX_UDP_RECV)
+                conn, addr = server.accept()
             except socket.timeout:
                 continue
             except OSError:
-                continue
+                break
 
-            if not self._camera_connected:
-                print(f"Camera receiving from {addr}")
-                self._camera_connected = True
+            print(f"Camera connected from {addr}")
+            self._camera_connected = True
+            conn.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
 
-            if len(data) < 4:
-                continue
-            frame_len = struct.unpack(">I", data[:4])[0]
-            jpeg_data = data[4:]
-            if len(jpeg_data) != frame_len:
-                continue
+            # Read length-prefixed JPEG frames from the stream
+            while self.running:
+                header = self._recv_exactly(conn, 4)
+                if header is None:
+                    print(f"Camera disconnected from {addr}")
+                    self._camera_connected = False
+                    break
 
-            bgr = cv2.imdecode(
-                np.frombuffer(jpeg_data, dtype=np.uint8), cv2.IMREAD_COLOR)
-            if bgr is None:
-                continue
-            rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+                frame_len = struct.unpack(">I", header)[0]
+                jpeg_data = self._recv_exactly(conn, frame_len)
+                if jpeg_data is None:
+                    print(f"Camera disconnected from {addr}")
+                    self._camera_connected = False
+                    break
 
-            with self._camera_lock:
-                self._camera_frame = rgb
+                bgr = cv2.imdecode(
+                    np.frombuffer(jpeg_data, dtype=np.uint8), cv2.IMREAD_COLOR)
+                if bgr is None:
+                    continue
+                rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
 
-            self._camera_frame_count += 1
-            now = time.monotonic()
-            elapsed = now - self._camera_fps_time
-            if elapsed >= 1.0:
-                self._camera_fps = self._camera_frame_count / elapsed
-                self._camera_frame_count = 0
-                self._camera_fps_time = now
+                with self._camera_lock:
+                    self._camera_frame = rgb
 
-            try:
-                self._fwd_sock.sendto(
-                    data, (self.args.jetson_host, self.args.jetson_port))
-            except OSError:
-                pass
+                self._camera_frame_count += 1
+                now = time.monotonic()
+                elapsed = now - self._camera_fps_time
+                if elapsed >= 1.0:
+                    self._camera_fps = self._camera_frame_count / elapsed
+                    self._camera_frame_count = 0
+                    self._camera_fps_time = now
 
-        sock.close()
+                # Forward to Jetson (still UDP) once experience has started
+                if self._experience_started:
+                    fwd_data = header + jpeg_data
+                    try:
+                        self._fwd_sock.sendto(
+                            fwd_data,
+                            (self.args.jetson_host, self.args.jetson_port))
+                    except OSError:
+                        pass
+
+            conn.close()
+
+        server.close()
 
     def _jetson_recv_loop(self):
         """Receive processed frames back from Jetson on --return-port."""
@@ -408,6 +519,10 @@ class ReceiverJetsonFullApp:
                     self._vlm_rendered_count = min(
                         self._vlm_rendered_count, len(self._vlm_messages))
 
+            # Trigger step completion check on each new VLM entry
+            if self._experience_started:
+                self._maybe_check_steps()
+
         sock.close()
 
     def _recipe_tcp_loop(self):
@@ -477,10 +592,15 @@ class ReceiverJetsonFullApp:
                 # Update recipe steps
                 with self._recipe_lock:
                     self._recipe_steps = recipe_steps
-                    self._recipe_rendered_count = 0
+                    self._task_completed = [False] * len(recipe_steps)
+                    self._task_queue_updated = True
 
                 print(f"Received recipe from {addr} with {len(recipe_steps)} steps")
                 self._append_vlm_message(f"[RECIPE] Received recipe with {len(recipe_steps)} steps")
+                self._start_experience(
+                    f"Hi! I see you have a {len(recipe_steps)}-step recipe. "
+                    f"Let's get cooking! Ask me anything along the way."
+                )
 
             except (json.JSONDecodeError, UnicodeDecodeError) as e:
                 print(f"Recipe connection from {addr}: JSON decode error: {e}")
@@ -489,6 +609,173 @@ class ReceiverJetsonFullApp:
             print(f"Recipe connection from {addr}: error: {e}")
         finally:
             client_sock.close()
+
+    # -- HTTP API server --
+
+    def _http_server_loop(self):
+        """Run HTTP server for /api/chat POST endpoint."""
+        handler = _make_http_handler(self)
+        server = HTTPServer(("0.0.0.0", self.args.http_port), handler)
+        server.timeout = 1.0
+        print(f"HTTP API server listening on port {self.args.http_port} ...")
+        while self.running:
+            server.handle_request()
+        server.server_close()
+
+    def _handle_chat_post(self, data):
+        """Process POST /api/chat payload.
+
+        Accepts either:
+          - A plain JSON list: ["step 1", "step 2", ...]
+          - A dict with recommendations: {"recommendations": [{...}], ...}
+        """
+        print(f"[HTTP] POST /api/chat payload type: {type(data).__name__}")
+        print(f"[HTTP] Full payload: {json.dumps(data, indent=2, default=str)[:2000]}")
+
+        # Plain list — treat directly as recipe steps
+        if isinstance(data, list):
+            steps = [_step_to_string(s) for s in data]
+            if not steps:
+                print("[HTTP] Empty list received, ignoring")
+                return
+            with self._recipe_lock:
+                self._recipe_steps = steps
+                self._task_completed = [False] * len(steps)
+                self._task_queue_updated = True
+            self._append_vlm_message(
+                f"[RECIPE] Received {len(steps)} steps")
+            print(f"Loaded recipe with {len(steps)} steps (plain list)")
+            self._start_experience(
+                f"Hi! I see you have a {len(steps)}-step recipe. "
+                f"Let's get cooking! Ask me anything along the way."
+            )
+            return
+
+        # Dict payload — original format
+        message = data.get("message", "")
+        recommendations = data.get("recommendations", [])
+
+        if message:
+            self._append_vlm_message(f"[CHAT] {message}")
+
+        if recommendations:
+            print(f"[HTTP] Found {len(recommendations)} recommendation(s)")
+            rec = recommendations[0]
+            print(f"[HTTP] First recommendation keys: {list(rec.keys()) if isinstance(rec, dict) else type(rec)}")
+            task_queue = rec.get("recipeTaskQueue", [])
+            if task_queue:
+                steps = [_step_to_string(s) for s in task_queue]
+                with self._recipe_lock:
+                    self._recipe_steps = steps
+                    self._task_completed = [False] * len(steps)
+                    self._task_queue_updated = True
+
+                name = rec.get("name", "Unknown Recipe")
+                self._append_vlm_message(
+                    f"[RECIPE] {name}: {len(steps)} steps loaded")
+                print(f"Loaded recipe '{name}' with {len(steps)} steps")
+                self._start_experience(
+                    f"Hi! I've loaded {name} with {len(steps)} steps. "
+                    f"Let's get cooking! Ask me anything along the way."
+                )
+            else:
+                print(f"[HTTP] No 'recipeTaskQueue' in recommendation (or empty)")
+        else:
+            print(f"[HTTP] No 'recommendations' field in payload")
+
+    # -- Experience lifecycle --
+
+    def _start_experience(self, greeting=None):
+        """Activate the full pipeline: Jetson forwarding, audio, VLM checks.
+
+        Called when a recipe is received or user clicks 'Start Without Recipe'.
+        Sends a TTS greeting to the ESP32 speaker.
+        """
+        if self._experience_started:
+            return
+        self._experience_started = True
+        print("[EXP] Experience started — Jetson forwarding + audio + VLM active")
+        with self._voice_lock:
+            self._voice_state = "Listening"
+
+        # Update GUI: disable the start-without-recipe button (main thread)
+        try:
+            self.root.after(0, lambda: self._start_btn.configure(
+                state="disabled", text="Started"))
+        except Exception:
+            pass
+
+        # Greet the user via TTS (respects mute)
+        msg = greeting or "Hi! I'm Remy, your kitchen assistant. Let's get cooking!"
+        self._append_vlm_message(f"[ASSISTANT] {msg}")
+        if not self._muted:
+            threading.Thread(
+                target=self._speak_to_esp32, args=(msg,), daemon=True).start()
+
+    # -- Step completion checker --
+
+    def _maybe_check_steps(self):
+        """Trigger a step completion check if not already running."""
+        with self._recipe_lock:
+            if not self._recipe_steps:
+                return
+        if self._step_check_in_progress:
+            return
+        self._step_check_in_progress = True
+        threading.Thread(
+            target=self._check_step_completion, daemon=True).start()
+
+    def _check_step_completion(self):
+        """Ask Claude which recipe steps are completed based on VLM logs."""
+        try:
+            with self._recipe_lock:
+                steps = list(self._recipe_steps)
+            if not steps:
+                return
+
+            with self._vlm_lock:
+                vlm_log = "\n".join(self._vlm_messages)
+
+            steps_text = "\n".join(
+                f"{i}. {s}" for i, s in enumerate(steps))
+
+            prompt = (
+                f"Recipe steps:\n{steps_text}\n\n"
+                f"Kitchen camera observations:\n{vlm_log}\n\n"
+                f"Based on these observations, which steps are completed?"
+            )
+
+            response = self._claude_client.messages.create(
+                model=CLAUDE_MODEL,
+                max_tokens=256,
+                system=STEP_CHECK_SYSTEM,
+                messages=[{"role": "user", "content": prompt}],
+            )
+            text = response.content[0].text.strip()
+
+            # Strip markdown code fences if present
+            if text.startswith("```"):
+                text = text.split("\n", 1)[-1]
+            if text.endswith("```"):
+                text = text.rsplit("```", 1)[0]
+            text = text.strip()
+
+            result = json.loads(text)
+            completed_indices = result.get("completed", [])
+
+            with self._recipe_lock:
+                self._task_completed = [False] * len(self._recipe_steps)
+                for idx in completed_indices:
+                    if 0 <= idx < len(self._task_completed):
+                        self._task_completed[idx] = True
+                self._task_completion_dirty = True
+
+            print(f"Step check: completed = {completed_indices}")
+
+        except Exception as e:
+            print(f"Step completion check error: {e}")
+        finally:
+            self._step_check_in_progress = False
 
     # -- Audio / Voice AI threads --
 
@@ -517,6 +804,10 @@ class ReceiverJetsonFullApp:
             except OSError:
                 continue
 
+            # Skip all audio processing until experience starts
+            if not self._experience_started:
+                continue
+
             # Collect chunks for manual recording (Ask button)
             with self._manual_lock:
                 if self._manual_recording:
@@ -524,6 +815,10 @@ class ReceiverJetsonFullApp:
 
             # Check cooldown — skip VAD while in post-speech cooldown
             if time.monotonic() - self._last_speak_end < self._speak_cooldown:
+                continue
+
+            # Skip VAD entirely when muted — saves API tokens
+            if self._muted:
                 continue
 
             packet_buffer += data
@@ -586,6 +881,12 @@ class ReceiverJetsonFullApp:
 
     def _process_voice_query(self, audio_chunks):
         """Full voice AI pipeline: STT → Claude → TTS → ESP32."""
+        if self._muted:
+            print("Voice query skipped (muted)")
+            with self._voice_lock:
+                self._voice_state = "Listening"
+            return
+
         with self._voice_lock:
             self._voice_state = "Transcribing..."
 
@@ -600,7 +901,18 @@ class ReceiverJetsonFullApp:
         print(f"Transcription: {transcription}")
         self._append_vlm_message(f"[USER] {transcription}")
 
-        # --- Step 2: Build context from VLM messages and recipe steps ---
+        # --- Step 2: Capture current frame for Claude vision ---
+        with self._camera_lock:
+            frame = self._camera_frame
+        frame_jpeg = None
+        if frame is not None:
+            bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+            ok, encoded = cv2.imencode(
+                ".jpg", bgr, [cv2.IMWRITE_JPEG_QUALITY, 85])
+            if ok:
+                frame_jpeg = encoded.tobytes()
+
+        # --- Step 3: Build context from VLM messages and recipe steps ---
         with self._voice_lock:
             self._voice_state = "Thinking..."
 
@@ -610,8 +922,9 @@ class ReceiverJetsonFullApp:
         with self._recipe_lock:
             recipe_steps = list(self._recipe_steps)
 
-        # --- Step 3: Query Claude ---
-        response_text = self._query_claude(transcription, vlm_context, recipe_steps)
+        # --- Step 4: Query Claude (with live frame if available) ---
+        response_text = self._query_claude(
+            transcription, vlm_context, recipe_steps, frame_jpeg)
         if not response_text:
             print("No Claude response, returning to listening.")
             with self._voice_lock:
@@ -621,7 +934,7 @@ class ReceiverJetsonFullApp:
         print(f"Claude response: {response_text}")
         self._append_vlm_message(f"[ASSISTANT] {response_text}")
 
-        # --- Step 4: Generate TTS and stream to ESP32 ---
+        # --- Step 5: Generate TTS and stream to ESP32 ---
         with self._voice_lock:
             self._voice_state = "Speaking..."
 
@@ -662,8 +975,15 @@ class ReceiverJetsonFullApp:
             print(f"STT error: {e}")
             return None
 
-    def _query_claude(self, question, vlm_context, recipe_steps):
-        """Query Claude with the user's question, VLM scene context, and recipe steps."""
+    def _query_claude(self, question, vlm_context, recipe_steps,
+                      frame_jpeg=None):
+        """Query Claude with the user's question, VLM scene context, recipe
+        steps, and optionally a live camera frame (JPEG bytes).
+
+        When *frame_jpeg* is provided the image is sent inline so Claude can
+        see the current kitchen scene directly — this offloads the immediate
+        visual analysis from the Jetson Nano's Ollama VLM.
+        """
         context_parts = []
 
         if recipe_steps:
@@ -681,16 +1001,38 @@ class ReceiverJetsonFullApp:
             )
 
         if context_parts:
-            user_message = "\n".join(context_parts) + f"\nUser question: {question}"
+            text_msg = "\n".join(context_parts) + f"\nUser question: {question}"
         else:
-            user_message = f"User question: {question}"
+            text_msg = f"User question: {question}"
+
+        # Build message content — include live frame if available
+        content = []
+        if frame_jpeg is not None:
+            b64_img = base64.b64encode(frame_jpeg).decode("ascii")
+            content.append({
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": "image/jpeg",
+                    "data": b64_img,
+                },
+            })
+            content.append({
+                "type": "text",
+                "text": (
+                    "Above is a live image from the kitchen camera right now.\n\n"
+                    + text_msg
+                ),
+            })
+        else:
+            content = text_msg  # plain string when no image
 
         try:
             response = self._claude_client.messages.create(
                 model=CLAUDE_MODEL,
                 max_tokens=256,
                 system=CLAUDE_SYSTEM_PROMPT,
-                messages=[{"role": "user", "content": user_message}],
+                messages=[{"role": "user", "content": content}],
             )
             return response.content[0].text.strip()
         except Exception as e:
@@ -701,8 +1043,12 @@ class ReceiverJetsonFullApp:
         """Generate TTS audio and stream to ESP32 via UDP.
 
         Serialized with _tts_lock so concurrent voice queries never
-        interleave audio packets on the wire.
+        interleave audio packets on the wire. Skipped entirely when muted.
         """
+        if self._muted:
+            print("TTS skipped (muted)")
+            return
+
         with self._tts_lock:
             try:
                 # Generate speech with ElevenLabs
@@ -766,47 +1112,97 @@ class ReceiverJetsonFullApp:
         style.theme_use("clam")
         style.configure("TFrame", background="#1e1e2e")
         style.configure("TLabel", background="#1e1e2e", foreground="#cdd6f4",
-                         font=("sans-serif", 8))
-        style.configure("Header.TLabel", font=("sans-serif", 9, "bold"),
+                         font=("sans-serif", 7))
+        style.configure("Header.TLabel", font=("sans-serif", 7, "bold"),
                          foreground="#89b4fa")
-        style.configure("Status.TLabel", font=("sans-serif", 9),
+        style.configure("Status.TLabel", font=("sans-serif", 7),
                          foreground="#a6e3a1")
-        style.configure("Warn.TLabel", font=("sans-serif", 9),
+        style.configure("Warn.TLabel", font=("sans-serif", 7),
                          foreground="#fab387")
-        style.configure("TButton", font=("sans-serif", 8, "bold"),
-                         padding=3)
+        style.configure("TButton", font=("sans-serif", 7, "bold"),
+                         padding=2)
 
-        # -- Top: two image panels side by side --
+        # -- Controls (TOP) --
+        controls = ttk.Frame(self.root)
+        controls.pack(side="top", padx=4, pady=(4, 2), fill="x")
+
+        self._start_btn = ttk.Button(
+            controls, text="Start Without Recipe",
+            command=self._start_experience)
+        self._start_btn.pack(side="left", padx=(0, 4))
+        self.ask_btn = ttk.Button(controls, text="Ask",
+                                   command=self._toggle_ask)
+        self.ask_btn.pack(side="left", padx=(0, 4))
+        self.mute_btn = ttk.Button(controls, text="Mute",
+                                    command=self._toggle_mute)
+        self.mute_btn.pack(side="left", padx=(0, 4))
+        ttk.Button(controls, text="Save Raw",
+                   command=self.save_raw).pack(side="left", padx=(0, 4))
+        ttk.Button(controls, text="Save Processed",
+                   command=self.save_processed).pack(side="left", padx=(0, 4))
+        ttk.Button(controls, text="Quit",
+                   command=self.quit).pack(side="left", padx=(0, 4))
+
+        # Voice AI state indicator (in controls row)
+        self.voice_var = tk.StringVar(value="Voice: Waiting for recipe...")
+        style.configure("Voice.TLabel", font=("sans-serif", 7, "bold"),
+                         foreground="#b4befe", background="#1e1e2e")
+        self.voice_label = ttk.Label(controls, textvariable=self.voice_var,
+                                     style="Voice.TLabel")
+        self.voice_label.pack(side="right", padx=(4, 0))
+
+        # Temperature display (in controls row)
+        self.temp_var = tk.StringVar(value="Temp: --")
+        style.configure("Temp.TLabel", font=("sans-serif", 7, "bold"),
+                         foreground="#f38ba8", background="#1e1e2e")
+        self.temp_label = ttk.Label(controls, textvariable=self.temp_var,
+                                    style="Temp.TLabel")
+        self.temp_label.pack(side="right")
+
+        # -- Status bar (BOTTOM) --
+        status_frame = ttk.Frame(self.root)
+        status_frame.pack(side="bottom", padx=4, pady=(0, 2), fill="x")
+        self.status_var = tk.StringVar(
+            value=f"Waiting for camera on port {self.args.port} ...")
+        self.status_label = ttk.Label(status_frame, textvariable=self.status_var,
+                                      style="Warn.TLabel")
+        self.status_label.pack(side="left")
+
+        # -- Middle content: video, VLM log, recipe steps --
+
+        # -- Video panels (raw camera + Jetson processed side-by-side) --
         panels = ttk.Frame(self.root)
-        panels.pack(padx=4, pady=(4, 2), fill="both", expand=True)
+        panels.pack(padx=4, pady=(2, 1), fill="x")
 
         left = ttk.Frame(panels)
-        left.pack(side="left", padx=(0, 4), fill="both", expand=True)
-        ttk.Label(left, text="Camera Feed (Original)",
+        left.pack(side="left", fill="both", expand=True)
+        ttk.Label(left, text="Camera Feed (Raw)",
                   style="Header.TLabel").pack(anchor="w")
-        self.feed_canvas = tk.Canvas(left, width=DISPLAY_W, height=DISPLAY_H,
+        self.feed_canvas = tk.Canvas(left, width=DISPLAY_W,
+                                     height=DISPLAY_H,
                                      bg="#181825", highlightthickness=0)
         self.feed_canvas.pack(fill="both", expand=True)
         self._feed_photo = None
 
         right = ttk.Frame(panels)
-        right.pack(side="left", padx=(4, 0), fill="both", expand=True)
+        right.pack(side="left", fill="both", expand=True)
         ttk.Label(right, text="Jetson Processed",
                   style="Header.TLabel").pack(anchor="w")
-        self.result_canvas = tk.Canvas(right, width=DISPLAY_W, height=DISPLAY_H,
+        self.result_canvas = tk.Canvas(right, width=DISPLAY_W,
+                                       height=DISPLAY_H,
                                        bg="#181825", highlightthickness=0)
         self.result_canvas.pack(fill="both", expand=True)
         self._result_photo = None
 
         # -- VLM Analysis Log --
         vlm_frame = ttk.Frame(self.root)
-        vlm_frame.pack(padx=4, pady=(2, 2), fill="x")
+        vlm_frame.pack(padx=4, pady=(1, 1), fill="x")
         ttk.Label(vlm_frame, text="VLM Analysis Log",
                   style="Header.TLabel").pack(anchor="w")
         self.vlm_text = tk.Text(
             vlm_frame,
             height=VLM_LOG_LINES,
-            font=("monospace", 7),
+            font=("monospace", 6),
             bg="#181825",
             fg="#cdd6f4",
             insertbackground="#cdd6f4",
@@ -816,65 +1212,35 @@ class ReceiverJetsonFullApp:
         )
         self.vlm_text.pack(fill="x")
 
-        # -- Recipe Steps Display --
-        recipe_frame = ttk.Frame(self.root)
-        recipe_frame.pack(padx=4, pady=(2, 2), fill="x")
-        ttk.Label(recipe_frame, text="Recipe Steps",
+        # -- Recipe Steps Display (scrollable checkboxes) --
+        recipe_outer = ttk.Frame(self.root)
+        recipe_outer.pack(padx=4, pady=(1, 1), fill="both", expand=True)
+        ttk.Label(recipe_outer, text="Recipe Steps",
                   style="Header.TLabel").pack(anchor="w")
-        self.recipe_text = tk.Text(
-            recipe_frame,
-            height=4,
-            font=("monospace", 8),
-            bg="#181825",
-            fg="#a6e3a1",
-            insertbackground="#a6e3a1",
-            relief="flat",
-            wrap="word",
-            state="disabled",
-        )
-        self.recipe_text.pack(fill="x")
 
-        # -- Status bar --
-        status_frame = ttk.Frame(self.root)
-        status_frame.pack(padx=4, fill="x")
-        self.status_var = tk.StringVar(
-            value=f"Waiting for camera on port {self.args.port} ...")
-        self.status_label = ttk.Label(status_frame, textvariable=self.status_var,
-                                      style="Warn.TLabel")
-        self.status_label.pack(side="left")
+        recipe_canvas = tk.Canvas(recipe_outer, bg="#181825",
+                                  highlightthickness=0)
+        recipe_scrollbar = ttk.Scrollbar(recipe_outer, orient="vertical",
+                                         command=recipe_canvas.yview)
+        self._recipe_checks_frame = tk.Frame(recipe_canvas, bg="#181825")
 
-        # Voice AI state indicator
-        self.voice_var = tk.StringVar(value="Voice: Listening")
-        style.configure("Voice.TLabel", font=("sans-serif", 9, "bold"),
-                         foreground="#b4befe", background="#1e1e2e")
-        self.voice_label = ttk.Label(status_frame, textvariable=self.voice_var,
-                                     style="Voice.TLabel")
-        self.voice_label.pack(side="right", padx=(8, 0))
+        self._recipe_checks_frame.bind(
+            "<Configure>",
+            lambda e: recipe_canvas.configure(
+                scrollregion=recipe_canvas.bbox("all")))
 
-        # Temperature display
-        self.temp_var = tk.StringVar(value="Temp: --")
-        style.configure("Temp.TLabel", font=("sans-serif", 9, "bold"),
-                         foreground="#f38ba8", background="#1e1e2e")
-        self.temp_label = ttk.Label(status_frame, textvariable=self.temp_var,
-                                    style="Temp.TLabel")
-        self.temp_label.pack(side="right")
+        recipe_canvas.create_window((0, 0), window=self._recipe_checks_frame,
+                                    anchor="nw")
+        recipe_canvas.configure(yscrollcommand=recipe_scrollbar.set)
 
-        # -- Controls --
-        controls = ttk.Frame(self.root)
-        controls.pack(padx=4, pady=(2, 4), fill="x")
-
-        self.ask_btn = ttk.Button(controls, text="Ask",
-                                   command=self._toggle_ask)
-        self.ask_btn.pack(side="left", padx=(0, 6))
-        ttk.Button(controls, text="Save Raw",
-                   command=self.save_raw).pack(side="left", padx=(0, 6))
-        ttk.Button(controls, text="Save Processed",
-                   command=self.save_processed).pack(side="left", padx=(0, 6))
-        ttk.Button(controls, text="Quit",
-                   command=self.quit).pack(side="left", padx=(0, 6))
+        recipe_scrollbar.pack(side="right", fill="y")
+        recipe_canvas.pack(side="left", fill="both", expand=True)
+        self._recipe_canvas = recipe_canvas
+        self._recipe_check_vars = []
 
         # Keyboard shortcuts
         self.root.bind("a", lambda e: self._toggle_ask())
+        self.root.bind("m", lambda e: self._toggle_mute())
         self.root.bind("r", lambda e: self.save_raw())
         self.root.bind("p", lambda e: self.save_processed())
         self.root.bind("q", lambda e: self.quit())
@@ -891,7 +1257,7 @@ class ReceiverJetsonFullApp:
         with self._jetson_lock:
             jetson_frame = self._jetson_frame
 
-        # Render left panel (camera)
+        # Render raw camera panel
         if camera_frame is not None:
             cw = self.feed_canvas.winfo_width()
             ch = self.feed_canvas.winfo_height()
@@ -902,7 +1268,7 @@ class ReceiverJetsonFullApp:
             self.feed_canvas.delete("all")
             self.feed_canvas.create_image(cw // 2, ch // 2, image=photo)
 
-        # Render right panel (Jetson processed)
+        # Render Jetson processed panel
         if jetson_frame is not None:
             cw = self.result_canvas.winfo_width()
             ch = self.result_canvas.winfo_height()
@@ -924,18 +1290,48 @@ class ReceiverJetsonFullApp:
             self.vlm_text.see("end")
             self.vlm_text.configure(state="disabled")
 
-        # Render recipe steps
+        # Update recipe step checkboxes
         with self._recipe_lock:
-            recipe_steps = list(self._recipe_steps)
-            recipe_rendered_count = self._recipe_rendered_count
-        if recipe_rendered_count == 0 and recipe_steps:
-            self.recipe_text.configure(state="normal")
-            self.recipe_text.delete("1.0", "end")
-            for i, step in enumerate(recipe_steps, 1):
-                self.recipe_text.insert("end", f"{i}. {step}\n")
-            self.recipe_text.configure(state="disabled")
-            with self._recipe_lock:
-                self._recipe_rendered_count = 1
+            rebuild_checks = self._task_queue_updated
+            update_checks = self._task_completion_dirty
+            if rebuild_checks:
+                self._task_queue_updated = False
+                steps = list(self._recipe_steps)
+                completed = list(self._task_completed)
+            elif update_checks:
+                self._task_completion_dirty = False
+                completed = list(self._task_completed)
+                steps = None
+            else:
+                steps = None
+                completed = None
+
+        if rebuild_checks:
+            for w in self._recipe_checks_frame.winfo_children():
+                w.destroy()
+            self._recipe_check_vars = []
+            for i, step in enumerate(steps):
+                var = tk.BooleanVar(
+                    value=completed[i] if i < len(completed) else False)
+                cb = tk.Checkbutton(
+                    self._recipe_checks_frame,
+                    text=f"{i + 1}. {step}",
+                    variable=var,
+                    font=("monospace", 7),
+                    bg="#181825", fg="#a6e3a1",
+                    selectcolor="#313244",
+                    activebackground="#181825",
+                    activeforeground="#a6e3a1",
+                    anchor="w",
+                    wraplength=740,
+                    justify="left",
+                )
+                cb.pack(fill="x", anchor="w")
+                self._recipe_check_vars.append(var)
+        elif update_checks and completed is not None:
+            for i, var in enumerate(self._recipe_check_vars):
+                if i < len(completed):
+                    var.set(completed[i])
 
         # Update status bar
         if not self._camera_connected:
@@ -982,8 +1378,21 @@ class ReceiverJetsonFullApp:
 
     # -- Actions --
 
+    def _toggle_mute(self):
+        """Toggle mute state — when muted, TTS audio is not sent to ESP32."""
+        self._muted = not self._muted
+        if self._muted:
+            self.mute_btn.configure(text="Unmute")
+            print("Audio muted")
+        else:
+            self.mute_btn.configure(text="Mute")
+            print("Audio unmuted")
+
     def _toggle_ask(self):
         """Toggle manual recording. Press to start, press again to stop & send."""
+        if not self._experience_started:
+            print("Experience not started yet — ignoring Ask")
+            return
         with self._manual_lock:
             if self._manual_recording:
                 # Stop recording and process
@@ -1092,6 +1501,10 @@ def main():
     # Recipe TCP server args
     ap.add_argument("--recipe-port", type=int, default=9005,
                     help="TCP port to receive recipe steps (default 9005)")
+
+    # HTTP API server
+    ap.add_argument("--http-port", type=int, default=HTTP_PORT,
+                    help=f"HTTP port for /api/chat endpoint (default {HTTP_PORT})")
 
     args = ap.parse_args()
 

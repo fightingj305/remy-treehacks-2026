@@ -1,7 +1,7 @@
 """
 sender.py — Runs on the Camera RPi.
 Captures video from a USB webcam (e.g. Logitech Brio) and streams
-MJPEG frames over UDP to the base station.
+MJPEG frames over TCP to the base station.
 
 Usage:
     python3 sender.py --host <BASE_STATION_IP> --port 9000
@@ -14,8 +14,20 @@ import time
 
 import cv2
 
-# Max safe UDP payload (65535 - 20 IP header - 8 UDP header - 4 our header)
-MAX_UDP_PAYLOAD = 65503
+
+def _connect_with_retry(host, port, interval=2.0):
+    """Keep trying to connect until the base station is reachable."""
+    while True:
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            sock.connect((host, port))
+            print(f"Connected to {host}:{port}")
+            return sock
+        except OSError as e:
+            print(f"Connection to {host}:{port} failed ({e}), retrying...")
+            sock.close()
+            time.sleep(interval)
 
 
 def start_streaming(host, port, width, height, fps):
@@ -27,14 +39,12 @@ def start_streaming(host, port, width, height, fps):
     if not cap.isOpened():
         raise RuntimeError("Could not open webcam")
 
-    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 4 * 1024 * 1024)
-    dest = (host, port)
-
-    print(f"Streaming UDP to {host}:{port} ({width}x{height} @ {fps}fps) ...")
+    print(f"Streaming TCP to {host}:{port} ({width}x{height} @ {fps}fps) ...")
 
     encode_params = [cv2.IMWRITE_JPEG_QUALITY, 80]
     frame_interval = 1.0 / fps
+
+    sock = _connect_with_retry(host, port)
 
     try:
         while True:
@@ -48,14 +58,14 @@ def start_streaming(host, port, width, height, fps):
                 continue
 
             data = jpeg.tobytes()
-            if len(data) > MAX_UDP_PAYLOAD:
-                continue  # skip oversized frames
-
             header = struct.pack(">I", len(data))
             try:
-                sock.sendto(header + data, dest)
-            except OSError:
-                pass
+                sock.sendall(header + data)
+            except (OSError, BrokenPipeError):
+                print("Connection lost, reconnecting...")
+                sock.close()
+                sock = _connect_with_retry(host, port)
+                continue
 
             elapsed = time.monotonic() - t0
             sleep_time = frame_interval - elapsed

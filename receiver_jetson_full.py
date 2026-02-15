@@ -205,6 +205,21 @@ class ReceiverJetsonFullApp:
         # Voice AI state
         self._voice_state = "Listening"
         self._voice_lock = threading.Lock()
+        self._last_speak_end = 0.0  # monotonic timestamp of last TTS finish
+        self._speak_cooldown = 7.0  # seconds to ignore VAD after speaking
+
+        # Manual recording state (for Ask button)
+        self._manual_recording = False
+        self._manual_chunks = []
+        self._manual_lock = threading.Lock()
+
+        # Lock to serialize TTS output — prevents interleaved audio packets
+        self._tts_lock = threading.Lock()
+
+        # Shared socket for TTS output to ESP32 (reused across all queries)
+        self._tts_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self._tts_sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF,
+                                  4 * 1024 * 1024)
 
         # Recipe steps state
         self._recipe_steps = []
@@ -502,6 +517,15 @@ class ReceiverJetsonFullApp:
             except OSError:
                 continue
 
+            # Collect chunks for manual recording (Ask button)
+            with self._manual_lock:
+                if self._manual_recording:
+                    self._manual_chunks.append(data)
+
+            # Check cooldown — skip VAD while in post-speech cooldown
+            if time.monotonic() - self._last_speak_end < self._speak_cooldown:
+                continue
+
             packet_buffer += data
 
             while len(packet_buffer) >= bytes_needed:
@@ -603,8 +627,11 @@ class ReceiverJetsonFullApp:
 
         self._speak_to_esp32(response_text)
 
+        # Start cooldown so VAD doesn't trigger on the TTS playback
+        self._last_speak_end = time.monotonic()
+
         with self._voice_lock:
-            self._voice_state = "Listening"
+            self._voice_state = "Cooldown"
 
     def _transcribe_audio(self, audio_chunks):
         """Transcribe recorded audio chunks via ElevenLabs STT."""
@@ -671,53 +698,56 @@ class ReceiverJetsonFullApp:
             return None
 
     def _speak_to_esp32(self, text):
-        """Generate TTS audio and stream to ESP32 via UDP."""
-        try:
-            # Generate speech with ElevenLabs
-            audio_gen = self._elevenlabs_client.text_to_speech.convert(
-                text=text,
-                voice_id=TTS_VOICE_ID,
-                model_id=TTS_MODEL_ID,
-                output_format=TTS_OUTPUT_FORMAT,
-            )
-            audio_bytes = b''.join(audio_gen)
+        """Generate TTS audio and stream to ESP32 via UDP.
 
-            # Convert MP3 to WAV via ffmpeg
-            process = subprocess.Popen(
-                [
-                    'ffmpeg', '-i', 'pipe:0',
-                    '-f', 'wav', '-acodec', 'pcm_s16le',
-                    '-ar', str(AUDIO_RATE),
-                    '-ac', '2',  # Stereo for ESP32 DAC
-                    'pipe:1',
-                ],
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.DEVNULL,
-            )
-            wav_data, _ = process.communicate(input=audio_bytes)
+        Serialized with _tts_lock so concurrent voice queries never
+        interleave audio packets on the wire.
+        """
+        with self._tts_lock:
+            try:
+                # Generate speech with ElevenLabs
+                audio_gen = self._elevenlabs_client.text_to_speech.convert(
+                    text=text,
+                    voice_id=TTS_VOICE_ID,
+                    model_id=TTS_MODEL_ID,
+                    output_format=TTS_OUTPUT_FORMAT,
+                )
+                audio_bytes = b''.join(audio_gen)
 
-            # Stream WAV PCM data to ESP32
-            wf = wave.open(io.BytesIO(wav_data), 'rb')
-            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                # Convert MP3 to WAV via ffmpeg
+                process = subprocess.Popen(
+                    [
+                        'ffmpeg', '-i', 'pipe:0',
+                        '-f', 'wav', '-acodec', 'pcm_s16le',
+                        '-ar', str(AUDIO_RATE),
+                        '-ac', '2',  # Stereo for ESP32 DAC
+                        'pipe:1',
+                    ],
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.DEVNULL,
+                )
+                wav_data, _ = process.communicate(input=audio_bytes)
 
-            esp32_addr = (self.args.esp32_host, self.args.esp32_audio_port)
-            print(f"Streaming TTS to ESP32 at {esp32_addr} "
-                  f"({wf.getnframes() / wf.getframerate():.1f}s)")
+                # Stream WAV PCM data to ESP32 using the shared socket
+                wf = wave.open(io.BytesIO(wav_data), 'rb')
 
-            while True:
-                data = wf.readframes(TTS_FRAMES_PER_PACKET)
-                if not data:
-                    break
-                sock.sendto(data, esp32_addr)
-                time.sleep(TTS_FRAMES_PER_PACKET / AUDIO_RATE * 0.8)
+                esp32_addr = (self.args.esp32_host, self.args.esp32_audio_port)
+                print(f"Streaming TTS to ESP32 at {esp32_addr} "
+                      f"({wf.getnframes() / wf.getframerate():.1f}s)")
 
-            wf.close()
-            sock.close()
-            print("TTS streaming complete.")
+                while True:
+                    data = wf.readframes(TTS_FRAMES_PER_PACKET)
+                    if not data:
+                        break
+                    self._tts_sock.sendto(data, esp32_addr)
+                    time.sleep(TTS_FRAMES_PER_PACKET / AUDIO_RATE * 0.8)
 
-        except Exception as e:
-            print(f"TTS/streaming error: {e}")
+                wf.close()
+                print("TTS streaming complete.")
+
+            except Exception as e:
+                print(f"TTS/streaming error: {e}")
 
     def _append_vlm_message(self, msg):
         """Thread-safe append to VLM messages (shown in GUI log)."""
@@ -833,6 +863,9 @@ class ReceiverJetsonFullApp:
         controls = ttk.Frame(self.root)
         controls.pack(padx=4, pady=(2, 4), fill="x")
 
+        self.ask_btn = ttk.Button(controls, text="Ask",
+                                   command=self._toggle_ask)
+        self.ask_btn.pack(side="left", padx=(0, 6))
         ttk.Button(controls, text="Save Raw",
                    command=self.save_raw).pack(side="left", padx=(0, 6))
         ttk.Button(controls, text="Save Processed",
@@ -841,6 +874,7 @@ class ReceiverJetsonFullApp:
                    command=self.quit).pack(side="left", padx=(0, 6))
 
         # Keyboard shortcuts
+        self.root.bind("a", lambda e: self._toggle_ask())
         self.root.bind("r", lambda e: self.save_raw())
         self.root.bind("p", lambda e: self.save_processed())
         self.root.bind("q", lambda e: self.quit())
@@ -931,14 +965,69 @@ class ReceiverJetsonFullApp:
         elif self._sensor_path is None:
             self.temp_var.set("Temp: no sensor")
 
-        # Update voice state
+        # Update voice state (show cooldown remaining if active)
+        cooldown_remaining = self._speak_cooldown - (
+            time.monotonic() - self._last_speak_end)
         with self._voice_lock:
             voice_state = self._voice_state
-        self.voice_var.set(f"Voice: {voice_state}")
+            if voice_state == "Cooldown" and cooldown_remaining <= 0:
+                self._voice_state = "Listening"
+                voice_state = "Listening"
+        if voice_state == "Cooldown" and cooldown_remaining > 0:
+            self.voice_var.set(f"Voice: Cooldown ({cooldown_remaining:.0f}s)")
+        else:
+            self.voice_var.set(f"Voice: {voice_state}")
 
         self.root.after(50, self._update_display)
 
     # -- Actions --
+
+    def _toggle_ask(self):
+        """Toggle manual recording. Press to start, press again to stop & send."""
+        with self._manual_lock:
+            if self._manual_recording:
+                # Stop recording and process
+                self._manual_recording = False
+                chunks = self._manual_chunks
+                self._manual_chunks = []
+            else:
+                # Start recording
+                self._manual_recording = True
+                self._manual_chunks = []
+                with self._voice_lock:
+                    self._voice_state = "Recording (manual)..."
+                self.ask_btn.configure(text="Stop")
+                print("Manual recording started (press Ask/a again to stop)")
+                return
+
+        # Process the recorded audio
+        self.ask_btn.configure(text="Ask")
+        if not chunks:
+            print("No audio captured.")
+            with self._voice_lock:
+                self._voice_state = "Listening"
+            return
+
+        # Combine raw UDP packets into VAD-sized chunks for STT
+        raw_audio = b''.join(chunks)
+        # Split into chunks matching the expected format for _process_voice_query
+        samples_needed_44k = int(VAD_CHUNK_SAMPLES * AUDIO_RATE / VAD_RATE)
+        bytes_needed = samples_needed_44k * AUDIO_SAMPLE_WIDTH
+        audio_chunks = []
+        for i in range(0, len(raw_audio) - bytes_needed + 1, bytes_needed):
+            audio_chunks.append(raw_audio[i:i + bytes_needed])
+        # Include any remaining bytes as a final chunk
+        remainder = len(raw_audio) % bytes_needed
+        if remainder > 0:
+            audio_chunks.append(raw_audio[-(remainder):])
+
+        print(f"Manual recording stopped: {len(raw_audio)} bytes, "
+              f"{len(raw_audio) / (AUDIO_RATE * AUDIO_SAMPLE_WIDTH):.1f}s")
+        threading.Thread(
+            target=self._process_voice_query,
+            args=(audio_chunks,),
+            daemon=True,
+        ).start()
 
     def save_raw(self):
         with self._camera_lock:

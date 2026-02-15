@@ -19,22 +19,63 @@ export default function Dashboard() {
     'Medium Rare'
   ]);
   const [userInput, setUserInput] = useState('');
-
-  const recommendations: Recommendation[] = [
+  const [recommendations, setRecommendations] = useState<Recommendation[]>([
     { id: 1, name: 'Spaghetti', imageUrl: '/images/dishes/spaghetti.png' },
     { id: 2, name: 'Spaghetti', imageUrl: '/images/dishes/spaghetti.png' },
     { id: 3, name: 'Spaghetti', imageUrl: '/images/dishes/spaghetti.png' },
-  ];
+  ]);
+  const [isLoading, setIsLoading] = useState(false);
+  const [aiMessage, setAiMessage] = useState('');
 
   const handleSavePreferences = (preferences: string[]) => {
     setUserPreferences(preferences);
-    // TODO: Send preferences to AI backend
     console.log('Saved preferences:', preferences);
   };
 
-  const handleSubmit = () => {
-    // TODO: Send user input to AI backend
-    console.log('User input:', userInput);
+  const handleSubmit = async () => {
+    if (!userInput.trim() || isLoading) return;
+
+    setIsLoading(true);
+    try {
+      const response = await fetch('/api/chat', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          message: userInput,
+          preferences: userPreferences,
+        }),
+      });
+
+      if (!response.ok) {
+        throw new Error('Failed to get recommendations');
+      }
+
+      const data = await response.json();
+
+      if (data.recommendations && data.recommendations.length > 0) {
+        setRecommendations(
+          data.recommendations.map((rec: any, index: number) => ({
+            id: index + 1,
+            name: rec.name,
+            imageUrl: rec.imageUrl || '/images/dishes/placeholder.png',
+          }))
+        );
+      }
+
+      if (data.message) {
+        setAiMessage(data.message);
+      }
+
+      // Clear the input after successful submission
+      setUserInput('');
+    } catch (error) {
+      console.error('Error getting recommendations:', error);
+      // TODO: Show error message to user
+    } finally {
+      setIsLoading(false);
+    }
   };
 
   const handleVoiceInput = () => {
@@ -61,9 +102,9 @@ export default function Dashboard() {
         </div>
 
         {/* Greeting */}
-        <p className="text-gray-600 mb-2 text-lg">Good evening, Allen</p>
+        <p className="text-gray-600 mb-2 text-lg">hello Allen</p>
         <h1 className="text-4xl font-semibold mb-8">
-          What do you wish to cook for dinner today?
+          What do you wish to cook?
         </h1>
 
         {/* Input Box */}
@@ -110,21 +151,37 @@ export default function Dashboard() {
             {/* Submit Button */}
             <button
               onClick={handleSubmit}
-              className="text-white p-3 rounded-full transition-colors"
+              disabled={isLoading || !userInput.trim()}
+              className="text-white p-3 rounded-full transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
               style={{ backgroundColor: '#AF431D' }}
-              onMouseEnter={(e) => e.currentTarget.style.backgroundColor = '#8A3517'}
-              onMouseLeave={(e) => e.currentTarget.style.backgroundColor = '#AF431D'}
+              onMouseEnter={(e) => !isLoading && (e.currentTarget.style.backgroundColor = '#8A3517')}
+              onMouseLeave={(e) => !isLoading && (e.currentTarget.style.backgroundColor = '#AF431D')}
             >
-              <svg
-                width="20"
-                height="20"
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="2"
-              >
-                <path d="M12 19V5M5 12l7-7 7 7" />
-              </svg>
+              {isLoading ? (
+                <svg
+                  width="20"
+                  height="20"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="2"
+                  className="animate-spin"
+                >
+                  <circle cx="12" cy="12" r="10" strokeOpacity="0.25" />
+                  <path d="M12 2a10 10 0 0 1 10 10" strokeOpacity="0.75" />
+                </svg>
+              ) : (
+                <svg
+                  width="20"
+                  height="20"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="2"
+                >
+                  <path d="M12 19V5M5 12l7-7 7 7" />
+                </svg>
+              )}
             </button>
           </div>
         </div>
@@ -267,7 +324,7 @@ export default function Dashboard() {
 
                           {/* Cook button */}
                           <button className="relative z-10 flex flex-col items-center gap-1 transition-transform duration-300 group-hover:-translate-y-2 group-hover:scale-110">
-                            <div className="bg-black p-2 rounded-full hover:bg-gray-900 transition-all">
+                            <div className="bg-black p-2 rounded-full transition-colors group-hover:bg-[#AF431D]">
                               <svg
                                 width="20"
                                 height="20"
@@ -276,8 +333,7 @@ export default function Dashboard() {
                                 stroke="white"
                                 strokeWidth="2"
                               >
-                                <circle cx="12" cy="12" r="10" />
-                                <path d="M12 16V8M8 12l4-4 4 4" />
+                                <path d="M12 19V5M5 12l7-7 7 7" />
                               </svg>
                             </div>
                             <span className="text-white text-sm font-medium">Cook</span>

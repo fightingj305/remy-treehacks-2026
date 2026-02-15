@@ -5,12 +5,14 @@ import { useState } from 'react';
 interface RecommendationCardProps {
   name: string;
   imageUrl: string;
+  isPlaying?: boolean;
+  onTogglePlay?: () => void;
   onCook?: () => void;
 }
 
 const FALLBACK_IMAGE = '/images/dishes/placeholder.png';
 
-export default function RecommendationCard({ name, imageUrl, onCook }: RecommendationCardProps) {
+export default function RecommendationCard({ name, imageUrl, isPlaying = false, onTogglePlay, onCook }: RecommendationCardProps) {
   const [imgSrc, setImgSrc] = useState(imageUrl);
   const [isImageLoaded, setIsImageLoaded] = useState(false);
 
@@ -66,22 +68,37 @@ export default function RecommendationCard({ name, imageUrl, onCook }: Recommend
           {name}
         </h3>
 
-        {/* Cook button */}
+        {/* Play/Pause button */}
         <button
-          onClick={onCook}
+          onClick={() => {
+            if (onTogglePlay) onTogglePlay();
+            if (!isPlaying && onCook) onCook();
+          }}
           className="relative z-10 flex flex-col items-center gap-1 transition-transform duration-300 group-hover:-translate-y-2 group-hover:scale-110"
         >
-          <div className="bg-black p-2 rounded-full transition-colors group-hover:bg-[#AF431D]">
-            <svg
-              width="20"
-              height="20"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="white"
-              strokeWidth="2"
-            >
-              <path d="M12 19V5M5 12l7-7 7 7" />
-            </svg>
+          <div className={`p-2 rounded-full transition-colors ${isPlaying ? 'bg-[#AF431D]' : 'bg-[#333] group-hover:bg-[#AF431D]'}`}>
+            {isPlaying ? (
+              <svg
+                width="20"
+                height="20"
+                viewBox="0 0 24 24"
+                fill="white"
+                stroke="none"
+              >
+                <rect x="6" y="4" width="4" height="16" rx="1" />
+                <rect x="14" y="4" width="4" height="16" rx="1" />
+              </svg>
+            ) : (
+              <svg
+                width="20"
+                height="20"
+                viewBox="0 0 24 24"
+                fill="white"
+                stroke="none"
+              >
+                <path d="M8 5v14l11-7z" />
+              </svg>
+            )}
           </div>
           <span className="text-white text-sm font-medium">Cook</span>
         </button>

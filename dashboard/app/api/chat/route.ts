@@ -75,19 +75,32 @@ export async function POST(request: NextRequest) {
 
 When the user asks what to cook or requests meal recommendations, provide 3 specific meal suggestions that match their preferences and request.
 
-Return your response in the following JSON format:
+Return a JSON object that matches this exact schema:
+
 {
   "recommendations": [
     {
-      "name": "Meal Name",
-      "description": "Brief description of the dish",
-      "imageUrl": "/images/dishes/placeholder.png"
+      "name": string,
+      "description": string,
+      "imageUrl": string,
+      "recipeTaskQueue": string[]
     }
   ],
-  "message": "A friendly response to the user's request"
+  "message": string
 }
 
-Make sure the meal names are specific and appealing. Consider the user's preferences when making recommendations.`;
+"name" is the meal name,
+"description" is a brief description of the dish,
+"imageUrl" will be in the form "/images/dishes/placeholder.png",
+"recipeTaskQueue" recipeTaskQueue must be an ordered array of short, clear cooking steps. Each step should be a single actionable instruction.
+"message" is a friendly response to the user's request
+}
+
+Make sure the meal names are specific and appealing. Consider the user's preferences when making recommendations.
+
+You must return ONLY valid JSON.
+Do not include explanations, markdown, or text outside the JSON object.
+`;
 
     const response = await anthropic.messages.create({
       model: 'claude-sonnet-4-20250514',

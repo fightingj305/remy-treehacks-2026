@@ -167,8 +167,8 @@ try:
                 speech_prob = model(audio_16k_float, RATE_VAD).item()
             
             # Print probability every 30 chunks
-            if chunk_count % 30 == 0:
-                print(f"🎵 Chunk {chunk_count}: Speech probability = {speech_prob:.3f} (threshold: 0.3)")
+            # if chunk_count % 30 == 0:
+            #     print(f"🎵 Chunk {chunk_count}: Speech probability = {speech_prob:.3f} (threshold: 0.3)")
             
             # Process with VAD
             speech_dict = vad_iterator(audio_16k_float, return_seconds=False)

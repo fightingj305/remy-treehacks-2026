@@ -26,11 +26,11 @@ body {
 
 @keyframes slideInFromRight {
   from {
-    transform: translateX(50px) translateY(-30px);
+    transform: translateX(50px);
     opacity: 0;
   }
   to {
-    transform: translateX(0) translateY(0);
+    transform: translateX(0);
     opacity: 1;
   }
 }

@@ -137,7 +137,10 @@ export default function Dashboard() {
             setIsSidebarOpen(true);
             setSidebarAnimationKey(prev => prev + 1);
           }}
-          className="fixed top-8 right-8 bg-white p-3 rounded-full shadow-lg hover:shadow-xl transition-all border border-gray-200 z-30"
+          className="fixed top-8 right-8 p-3 rounded-full transition-colors z-30 text-gray-600 hover:text-gray-900"
+          style={{ backgroundColor: 'transparent' }}
+          onMouseEnter={(e) => e.currentTarget.style.backgroundColor = '#E5E5E5'}
+          onMouseLeave={(e) => e.currentTarget.style.backgroundColor = 'transparent'}
         >
           <svg
             width="24"
@@ -154,129 +157,139 @@ export default function Dashboard() {
 
       {/* Right Sidebar */}
       <aside
-        className={`bg-white border-l border-gray-200 transition-all duration-300 ${
-          isSidebarOpen ? 'w-96 p-8' : 'w-0 p-0 overflow-hidden'
+        className={`bg-white border-l border-gray-200 transition-all duration-300 relative ${
+          isSidebarOpen ? 'w-96' : 'w-0 overflow-hidden'
         }`}
       >
         {isSidebarOpen && (
-          <div key={sidebarAnimationKey} className="animate-slideInFromRight">
-            {/* Close Button */}
-            <button
-              onClick={() => setIsSidebarOpen(false)}
-              className="mb-6 bg-white p-3 rounded-full shadow-lg hover:shadow-xl transition-all border border-gray-200"
-            >
-              <svg
-                width="24"
-                height="24"
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="2"
+          <>
+            {/* Fixed Close Button */}
+            <div className="sticky top-0 z-20 bg-white px-8 pt-8">
+              <button
+                onClick={() => setIsSidebarOpen(false)}
+                className="mb-6 p-3 rounded-full transition-colors text-gray-600 hover:text-gray-900"
+                style={{ backgroundColor: 'transparent' }}
+                onMouseEnter={(e) => e.currentTarget.style.backgroundColor = '#E5E5E5'}
+                onMouseLeave={(e) => e.currentTarget.style.backgroundColor = 'transparent'}
               >
-                <path d="M9 18l6-6-6-6" />
-              </svg>
-            </button>
-
-            {/* Preferences */}
-            <div className="mb-8">
-              <div className="flex items-center justify-between mb-4">
-                <h2 className="text-sm text-gray-600">preferences</h2>
-                <button
-                  className="px-4 py-1 rounded-lg text-sm text-gray-600 hover:bg-gray-200 hover:text-gray-900 transition-colors"
-                  onClick={() => setIsPreferencesModalOpen(true)}
+                <svg
+                  width="24"
+                  height="24"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="2"
                 >
-                  Edit
-                </button>
-              </div>
-              <div className="flex flex-wrap gap-2">
-                {userPreferences.length > 0 ? (
-                  userPreferences.map((preference) => (
-                    <div
-                      key={preference}
-                      className="px-4 py-2 bg-amber-700 text-white rounded-full text-sm font-medium"
-                    >
-                      {preference}
-                    </div>
-                  ))
-                ) : (
-                  <p className="text-gray-500 text-sm italic">
-                    No preferences set. Click Edit to add some.
-                  </p>
-                )}
-              </div>
+                  <path d="M9 18l6-6-6-6" />
+                </svg>
+              </button>
             </div>
 
-            {/* Recommendations */}
-            <div>
-              <h2 className="text-sm text-gray-600 mb-4">recommendations</h2>
-              <div className="space-y-4">
-                {recommendations.map((item) => (
-                  <div
-                    key={item.id}
-                    className="rounded-2xl overflow-hidden cursor-pointer transition-all duration-300 hover:shadow-xl relative group"
-                  >
-                    <div
-                      className="h-32 relative flex items-end justify-between p-4"
-                      style={{
-                        backgroundImage: `url(${item.imageUrl})`,
-                        backgroundSize: 'cover',
-                        backgroundPosition: 'center',
-                        backgroundColor: '#ccc',
-                      }}
+            {/* Scrollable Content */}
+            <div className="overflow-y-auto px-8 pb-8" style={{ maxHeight: 'calc(100vh - 120px)' }}>
+              <div key={sidebarAnimationKey} className="animate-slideInFromRight">
+                {/* Preferences */}
+                <div className="mb-8">
+                  <div className="flex items-center justify-between mb-4">
+                    <h2 className="text-sm text-gray-600 uppercase font-medium">PREFERENCES</h2>
+                    <button
+                      className="px-4 py-1 rounded-lg text-sm text-gray-600 hover:bg-gray-200 hover:text-gray-900 transition-colors"
+                      onClick={() => setIsPreferencesModalOpen(true)}
                     >
-                      {/* Progressive blur overlay */}
-                      <div
-                        className="absolute inset-0"
-                        style={{
-                          backdropFilter: 'blur(4px)',
-                          WebkitBackdropFilter: 'blur(4px)',
-                          maskImage:
-                            'linear-gradient(to top, rgba(0, 0, 0, 1), rgba(0, 0, 0, 0))',
-                          WebkitMaskImage:
-                            'linear-gradient(to top, rgba(0, 0, 0, 1), rgba(0, 0, 0, 0))',
-                        }}
-                      ></div>
-
-                      {/* Dark gradient overlay */}
-                      <div
-                        className="absolute inset-0"
-                        style={{
-                          background:
-                            'linear-gradient(to top, rgba(0, 0, 0, 0.7), rgba(0, 0, 0, 0.3))',
-                        }}
-                      ></div>
-
-                      {/* Hover overlay - darker backdrop */}
-                      <div className="absolute inset-0 bg-black opacity-0 group-hover:opacity-20 transition-opacity duration-300"></div>
-
-                      {/* Meal name */}
-                      <h3 className="relative z-10 text-white text-lg font-medium">
-                        {item.name}
-                      </h3>
-
-                      {/* Cook button */}
-                      <button className="relative z-10 flex flex-col items-center gap-1 transition-transform duration-300 group-hover:-translate-y-2 group-hover:scale-110">
-                        <div className="bg-black p-2 rounded-full hover:bg-gray-900 transition-all">
-                          <svg
-                            width="20"
-                            height="20"
-                            viewBox="0 0 24 24"
-                            fill="none"
-                            stroke="white"
-                            strokeWidth="2"
-                          >
-                            <circle cx="12" cy="12" r="10" />
-                            <path d="M12 16V8M8 12l4-4 4 4" />
-                          </svg>
-                        </div>
-                        <span className="text-white text-sm font-medium">Cook</span>
-                      </button>
-                    </div>
+                      edit
+                    </button>
                   </div>
-                ))}
+                  <div className="flex flex-wrap gap-2">
+                    {userPreferences.length > 0 ? (
+                      userPreferences.map((preference) => (
+                        <div
+                          key={preference}
+                          className="px-4 py-2 bg-amber-700 text-white rounded-full text-sm font-medium"
+                        >
+                          {preference}
+                        </div>
+                      ))
+                    ) : (
+                      <p className="text-gray-500 text-sm italic">
+                        No preferences set. Click Edit to add some.
+                      </p>
+                    )}
+                  </div>
+                </div>
+
+                {/* Recommendations */}
+                <div>
+                  <h2 className="text-sm text-gray-600 mb-4 uppercase font-medium">RECOMMENDATIONS</h2>
+                  <div className="space-y-4">
+                    {recommendations.map((item) => (
+                      <div
+                        key={item.id}
+                        className="rounded-2xl overflow-hidden cursor-pointer transition-all duration-300 hover:shadow-xl relative group"
+                      >
+                        <div
+                          className="h-32 relative flex items-end justify-between p-4"
+                          style={{
+                            backgroundImage: `url(${item.imageUrl})`,
+                            backgroundSize: 'cover',
+                            backgroundPosition: 'center',
+                            backgroundColor: '#ccc',
+                          }}
+                        >
+                          {/* Progressive blur overlay */}
+                          <div
+                            className="absolute inset-0"
+                            style={{
+                              backdropFilter: 'blur(4px)',
+                              WebkitBackdropFilter: 'blur(4px)',
+                              maskImage:
+                                'linear-gradient(to top, rgba(0, 0, 0, 1), rgba(0, 0, 0, 0))',
+                              WebkitMaskImage:
+                                'linear-gradient(to top, rgba(0, 0, 0, 1), rgba(0, 0, 0, 0))',
+                            }}
+                          ></div>
+
+                          {/* Dark gradient overlay */}
+                          <div
+                            className="absolute inset-0"
+                            style={{
+                              background:
+                                'linear-gradient(to top, rgba(0, 0, 0, 0.7), rgba(0, 0, 0, 0.3))',
+                            }}
+                          ></div>
+
+                          {/* Hover overlay - darker backdrop */}
+                          <div className="absolute inset-0 bg-black opacity-0 group-hover:opacity-20 transition-opacity duration-300"></div>
+
+                          {/* Meal name */}
+                          <h3 className="relative z-10 text-white text-lg font-medium">
+                            {item.name}
+                          </h3>
+
+                          {/* Cook button */}
+                          <button className="relative z-10 flex flex-col items-center gap-1 transition-transform duration-300 group-hover:-translate-y-2 group-hover:scale-110">
+                            <div className="bg-black p-2 rounded-full hover:bg-gray-900 transition-all">
+                              <svg
+                                width="20"
+                                height="20"
+                                viewBox="0 0 24 24"
+                                fill="none"
+                                stroke="white"
+                                strokeWidth="2"
+                              >
+                                <circle cx="12" cy="12" r="10" />
+                                <path d="M12 16V8M8 12l4-4 4 4" />
+                              </svg>
+                            </div>
+                            <span className="text-white text-sm font-medium">Cook</span>
+                          </button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
               </div>
             </div>
-          </div>
+          </>
         )}
       </aside>
 

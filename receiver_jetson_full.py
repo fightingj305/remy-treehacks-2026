@@ -1,30 +1,86 @@
 """
-receiver_jetson.py — Runs on the Base Station RPi.
-Receives camera frames via UDP, forwards to Jetson Nano for processing,
-receives processed frames back, and displays both side-by-side.
-Also receives VLM analysis text from the Jetson and displays it in a
-scrollable log widget.
+receiver_jetson_full.py — Unified Base Station: video pipeline + voice AI.
+
+Receives camera frames via UDP, forwards to Jetson for processing,
+receives processed frames back, displays both side-by-side with VLM log.
+
+Additionally receives ESP32 microphone audio, runs Silero VAD to detect
+speech, transcribes via ElevenLabs STT, queries Claude (with VLM scene
+context) for a concise answer, generates TTS via ElevenLabs, and streams
+the audio back to the ESP32 speaker.
 
 Usage:
-    python3 receiver_jetson.py --port 9000 --jetson-host 192.168.55.1
-    python3 receiver_jetson.py --port 9000 --jetson-host 192.168.55.1 \
-        --jetson-port 9001 --return-port 9002
+    python3 receiver_jetson_full.py --port 9000 --jetson-host 192.168.55.1
+    python3 receiver_jetson_full.py --port 9000 --jetson-host 192.168.55.1 \
+        --esp32-host 172.20.10.12
 """
 
 import argparse
 import glob as globmod
+import io
 import os
 import socket
 import struct
+import subprocess
 import threading
 import time
 import tkinter as tk
+import wave
 from datetime import datetime
 from tkinter import ttk
 
+import anthropic
 import cv2
 import numpy as np
+import torch
+from dotenv import load_dotenv
+from elevenlabs.client import ElevenLabs
 from PIL import Image, ImageTk
+from scipy.signal import resample_poly
+from silero_vad import load_silero_vad, VADIterator
+
+load_dotenv()
+
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
+
+# Display size for each panel — sized to fit 800x480 DSI display
+DISPLAY_W = 380
+DISPLAY_H = 200
+MAX_UDP_RECV = 65535
+VLM_LOG_LINES = 8
+
+# Audio constants
+AUDIO_RATE = 44100        # Sample rate from ESP32
+VAD_RATE = 16000          # Silero VAD expected rate
+AUDIO_CHANNELS = 1
+AUDIO_SAMPLE_WIDTH = 2    # 16-bit
+AUDIO_BUFFER_SIZE = 1024  # UDP packet size from ESP32
+
+# VAD configuration
+VAD_CHUNK_SAMPLES = 512   # Silero requires exactly 512 samples at 16kHz
+MIN_SILENCE_DURATION_MS = 700
+SPEECH_PAD_MS = 300
+VAD_THRESHOLD = 0.3
+
+# ElevenLabs TTS config
+TTS_VOICE_ID = "JBFqnCBsd6RMkjVDRZzb"
+TTS_MODEL_ID = "eleven_multilingual_v2"
+TTS_OUTPUT_FORMAT = "mp3_44100_128"
+
+# Claude config
+CLAUDE_MODEL = "claude-opus-4-6"
+CLAUDE_SYSTEM_PROMPT = (
+    "You are a conversational AI kitchen helper. You are given a log of "
+    "visual scene analysis from a kitchen camera and a question from the "
+    "user. Give concise answers (1-3 sentences) as your output will be "
+    "fed into text-to-speech."
+)
+
+# TTS streaming to ESP32
+TTS_MAX_PACKET_SIZE = 1024
+TTS_FRAMES_PER_PACKET = TTS_MAX_PACKET_SIZE // (AUDIO_SAMPLE_WIDTH * 2)  # stereo
 
 # ---------------------------------------------------------------------------
 # DS18B20 temperature sensor helpers
@@ -43,10 +99,7 @@ def find_sensor():
 
 
 def read_temperature(device_path):
-    """Read temperature in Celsius from the sensor's sysfs file.
-
-    Returns the temperature as a float, or None on read failure.
-    """
+    """Read temperature in Celsius from the sensor's sysfs file."""
     slave_file = os.path.join(device_path, "w1_slave")
     try:
         with open(slave_file, "r") as f:
@@ -54,25 +107,15 @@ def read_temperature(device_path):
     except OSError:
         return None
 
-    # First line ends with YES if the CRC check passed
     if len(lines) < 2 or "YES" not in lines[0]:
         return None
 
-    # Second line contains t=<millidegrees>
     idx = lines[1].find("t=")
     if idx == -1:
         return None
 
     raw = int(lines[1][idx + 2:])
     return raw / 1000.0
-
-# Display size for each panel — sized to fit 800x480 DSI display
-DISPLAY_W = 380
-DISPLAY_H = 200
-
-MAX_UDP_RECV = 65535
-
-VLM_LOG_LINES = 8
 
 
 # ---------------------------------------------------------------------------
@@ -93,20 +136,38 @@ def rgb_to_photoimage(rgb_array, max_w, max_h):
     return ImageTk.PhotoImage(pil_img), new_w, new_h
 
 
+def resample_audio(audio_44k, up=160, down=441):
+    """Resample audio from 44100 Hz to 16000 Hz using scipy.
+
+    Args:
+        audio_44k: numpy int16 array at 44100 Hz
+        up: upsample factor (160 for 44100→16000)
+        down: downsample factor (441 for 44100→16000)
+
+    Returns:
+        torch float32 tensor at 16000 Hz, normalized to [-1, 1]
+    """
+    audio_float = audio_44k.astype(np.float32) / 32768.0
+    resampled = resample_poly(audio_float, up, down)
+    return torch.from_numpy(resampled.astype(np.float32))
+
+
 # ---------------------------------------------------------------------------
 # GUI Application
 # ---------------------------------------------------------------------------
 
-class ReceiverJetsonApp:
+class ReceiverJetsonFullApp:
     def __init__(self, root, args):
         self.root = root
         self.args = args
-        self.root.title("Receiver — Jetson Pipeline")
+        self.root.title("Receiver — Jetson Pipeline + Voice AI")
         self.root.geometry("800x480")
         self.root.configure(bg="#1e1e2e")
         self.root.protocol("WM_DELETE_WINDOW", self.quit)
 
         self.running = True
+
+        # Video state
         self._camera_frame = None
         self._jetson_frame = None
         self._camera_lock = threading.Lock()
@@ -137,11 +198,34 @@ class ReceiverJetsonApp:
         else:
             print("DS18B20 sensor not found — temperature display disabled")
 
+        # Voice AI state
+        self._voice_state = "Listening"
+        self._voice_lock = threading.Lock()
 
-        # Socket for forwarding to Jetson (created once, used by camera thread)
+        # Socket for forwarding to Jetson
         self._fwd_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self._fwd_sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF,
                                   4 * 1024 * 1024)
+
+        # API clients
+        self._claude_client = anthropic.Anthropic(
+            api_key=os.getenv("ANTHROPIC_API_KEY"),
+        )
+        self._elevenlabs_client = ElevenLabs(
+            api_key=os.getenv("ELEVENLABS_API_KEY"),
+        )
+
+        # Load Silero VAD (ONNX mode — avoids torch.jit issues on RPi)
+        print("Loading Silero VAD (ONNX)...")
+        self._vad_model = load_silero_vad(onnx=True)
+        print("Silero VAD loaded.")
+        self._vad_iterator = VADIterator(
+            self._vad_model,
+            threshold=VAD_THRESHOLD,
+            sampling_rate=VAD_RATE,
+            min_silence_duration_ms=MIN_SILENCE_DURATION_MS,
+            speech_pad_ms=SPEECH_PAD_MS,
+        )
 
         self._build_gui()
         self._start_network_threads()
@@ -153,6 +237,7 @@ class ReceiverJetsonApp:
         threading.Thread(target=self._camera_recv_loop, daemon=True).start()
         threading.Thread(target=self._jetson_recv_loop, daemon=True).start()
         threading.Thread(target=self._vlm_recv_loop, daemon=True).start()
+        threading.Thread(target=self._audio_recv_loop, daemon=True).start()
         if self._sensor_path:
             threading.Thread(target=self._temp_poll_loop, daemon=True).start()
 
@@ -177,7 +262,6 @@ class ReceiverJetsonApp:
                 print(f"Camera receiving from {addr}")
                 self._camera_connected = True
 
-            # Validate
             if len(data) < 4:
                 continue
             frame_len = struct.unpack(">I", data[:4])[0]
@@ -185,7 +269,6 @@ class ReceiverJetsonApp:
             if len(jpeg_data) != frame_len:
                 continue
 
-            # Decode for display
             bgr = cv2.imdecode(
                 np.frombuffer(jpeg_data, dtype=np.uint8), cv2.IMREAD_COLOR)
             if bgr is None:
@@ -195,7 +278,6 @@ class ReceiverJetsonApp:
             with self._camera_lock:
                 self._camera_frame = rgb
 
-            # Update camera FPS
             self._camera_frame_count += 1
             now = time.monotonic()
             elapsed = now - self._camera_fps_time
@@ -204,7 +286,6 @@ class ReceiverJetsonApp:
                 self._camera_frame_count = 0
                 self._camera_fps_time = now
 
-            # Forward raw datagram to Jetson
             try:
                 self._fwd_sock.sendto(
                     data, (self.args.jetson_host, self.args.jetson_port))
@@ -234,7 +315,6 @@ class ReceiverJetsonApp:
                 print(f"Jetson receiving from {addr}")
                 self._jetson_connected = True
 
-            # Validate
             if len(data) < 4:
                 continue
             frame_len = struct.unpack(">I", data[:4])[0]
@@ -242,7 +322,6 @@ class ReceiverJetsonApp:
             if len(jpeg_data) != frame_len:
                 continue
 
-            # Decode for display
             bgr = cv2.imdecode(
                 np.frombuffer(jpeg_data, dtype=np.uint8), cv2.IMREAD_COLOR)
             if bgr is None:
@@ -252,7 +331,6 @@ class ReceiverJetsonApp:
             with self._jetson_lock:
                 self._jetson_frame = rgb
 
-            # Update Jetson FPS
             self._jetson_frame_count += 1
             now = time.monotonic()
             elapsed = now - self._jetson_fps_time
@@ -264,7 +342,7 @@ class ReceiverJetsonApp:
         sock.close()
 
     def _temp_poll_loop(self):
-        """Poll the DS18B20 sensor every second and store the latest reading."""
+        """Poll the DS18B20 sensor every second."""
         while self.running:
             temp = read_temperature(self._sensor_path)
             with self._temp_lock:
@@ -292,20 +370,259 @@ class ReceiverJetsonApp:
             except UnicodeDecodeError:
                 continue
 
-            # Attach the most recent temperature reading to the log entry
             with self._temp_lock:
                 temp = self._temp_c
             if temp is not None:
-                msg = f"{msg}  [Temp: {temp:.1f}°C / {temp * 9 / 5 + 32:.1f}°F]"
+                msg = f"{msg}  [Temp: {temp:.1f}\u00b0C / {temp * 9 / 5 + 32:.1f}\u00b0F]"
 
             with self._vlm_lock:
                 self._vlm_messages.append(msg)
                 if len(self._vlm_messages) > self._vlm_max_messages:
-                    self._vlm_messages = self._vlm_messages[-self._vlm_max_messages:]
+                    self._vlm_messages = self._vlm_messages[
+                        -self._vlm_max_messages:]
                     self._vlm_rendered_count = min(
                         self._vlm_rendered_count, len(self._vlm_messages))
 
         sock.close()
+
+    # -- Audio / Voice AI threads --
+
+    def _audio_recv_loop(self):
+        """Receive ESP32 mic audio, run VAD, trigger voice query on speech end."""
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        sock.bind(("0.0.0.0", self.args.audio_port))
+        print(f"Listening for ESP32 audio on UDP port {self.args.audio_port} ...")
+
+        # Calculate how many 44.1 kHz bytes we need per VAD chunk
+        samples_needed_44k = int(VAD_CHUNK_SAMPLES * AUDIO_RATE / VAD_RATE)
+        bytes_needed = samples_needed_44k * AUDIO_SAMPLE_WIDTH
+
+        packet_buffer = b''
+        is_recording = False
+        recorded_chunks = []
+        chunk_count = 0
+
+        while self.running:
+            sock.settimeout(1.0)
+            try:
+                data, addr = sock.recvfrom(AUDIO_BUFFER_SIZE)
+            except socket.timeout:
+                continue
+            except OSError:
+                continue
+
+            packet_buffer += data
+
+            while len(packet_buffer) >= bytes_needed:
+                chunk_original = packet_buffer[:bytes_needed]
+                packet_buffer = packet_buffer[bytes_needed:]
+
+                # Convert to numpy int16
+                audio_44k = np.frombuffer(chunk_original, dtype=np.int16).copy()
+
+                # Resample 44100 → 16000 using scipy
+                audio_16k = resample_audio(audio_44k)
+
+                # Ensure exactly 512 samples
+                if len(audio_16k) < VAD_CHUNK_SAMPLES:
+                    padding = VAD_CHUNK_SAMPLES - len(audio_16k)
+                    audio_16k = torch.nn.functional.pad(audio_16k, (0, padding))
+                elif len(audio_16k) > VAD_CHUNK_SAMPLES:
+                    audio_16k = audio_16k[:VAD_CHUNK_SAMPLES]
+
+                chunk_count += 1
+
+                # Get speech probability
+                with torch.no_grad():
+                    speech_prob = self._vad_model(audio_16k, VAD_RATE).item()
+
+                if chunk_count % 30 == 0:
+                    print(f"Audio chunk {chunk_count}: "
+                          f"speech_prob={speech_prob:.3f}")
+
+                # Process with VAD iterator
+                speech_dict = self._vad_iterator(
+                    audio_16k, return_seconds=False)
+
+                if is_recording:
+                    recorded_chunks.append(chunk_original)
+
+                if speech_dict:
+                    if 'start' in speech_dict and not is_recording:
+                        print("Speech detected!")
+                        is_recording = True
+                        recorded_chunks = [chunk_original]
+                        with self._voice_lock:
+                            self._voice_state = "Recording..."
+
+                    if 'end' in speech_dict and is_recording:
+                        print("Speech ended, processing...")
+                        is_recording = False
+                        # Spawn processing in a separate thread
+                        chunks_copy = list(recorded_chunks)
+                        recorded_chunks = []
+                        threading.Thread(
+                            target=self._process_voice_query,
+                            args=(chunks_copy,),
+                            daemon=True,
+                        ).start()
+
+        sock.close()
+
+    def _process_voice_query(self, audio_chunks):
+        """Full voice AI pipeline: STT → Claude → TTS → ESP32."""
+        with self._voice_lock:
+            self._voice_state = "Transcribing..."
+
+        # --- Step 1: Transcribe audio with ElevenLabs STT ---
+        transcription = self._transcribe_audio(audio_chunks)
+        if not transcription:
+            print("No transcription result, returning to listening.")
+            with self._voice_lock:
+                self._voice_state = "Listening"
+            return
+
+        print(f"Transcription: {transcription}")
+        self._append_vlm_message(f"[USER] {transcription}")
+
+        # --- Step 2: Build context from VLM messages ---
+        with self._voice_lock:
+            self._voice_state = "Thinking..."
+
+        with self._vlm_lock:
+            vlm_context = "\n".join(self._vlm_messages[-20:])
+
+        # --- Step 3: Query Claude ---
+        response_text = self._query_claude(transcription, vlm_context)
+        if not response_text:
+            print("No Claude response, returning to listening.")
+            with self._voice_lock:
+                self._voice_state = "Listening"
+            return
+
+        print(f"Claude response: {response_text}")
+        self._append_vlm_message(f"[ASSISTANT] {response_text}")
+
+        # --- Step 4: Generate TTS and stream to ESP32 ---
+        with self._voice_lock:
+            self._voice_state = "Speaking..."
+
+        self._speak_to_esp32(response_text)
+
+        with self._voice_lock:
+            self._voice_state = "Listening"
+
+    def _transcribe_audio(self, audio_chunks):
+        """Transcribe recorded audio chunks via ElevenLabs STT."""
+        if not audio_chunks:
+            return None
+
+        audio_data = b''.join(audio_chunks)
+
+        wav_buffer = io.BytesIO()
+        with wave.open(wav_buffer, 'wb') as wf:
+            wf.setnchannels(AUDIO_CHANNELS)
+            wf.setsampwidth(AUDIO_SAMPLE_WIDTH)
+            wf.setframerate(AUDIO_RATE)
+            wf.writeframes(audio_data)
+        wav_buffer.seek(0)
+
+        try:
+            transcription = self._elevenlabs_client.speech_to_text.convert(
+                file=wav_buffer,
+                model_id="scribe_v2",
+                tag_audio_events=False,
+                language_code="eng",
+                diarize=False,
+            )
+            text = transcription.text.strip()
+            return text if text else None
+        except Exception as e:
+            print(f"STT error: {e}")
+            return None
+
+    def _query_claude(self, question, vlm_context):
+        """Query Claude with the user's question and VLM scene context."""
+        if vlm_context:
+            user_message = (
+                f"Here is the recent visual scene analysis log from the "
+                f"kitchen camera:\n\n{vlm_context}\n\n"
+                f"User question: {question}"
+            )
+        else:
+            user_message = f"User question: {question}"
+
+        try:
+            response = self._claude_client.messages.create(
+                model=CLAUDE_MODEL,
+                max_tokens=256,
+                system=CLAUDE_SYSTEM_PROMPT,
+                messages=[{"role": "user", "content": user_message}],
+            )
+            return response.content[0].text.strip()
+        except Exception as e:
+            print(f"Claude API error: {e}")
+            return None
+
+    def _speak_to_esp32(self, text):
+        """Generate TTS audio and stream to ESP32 via UDP."""
+        try:
+            # Generate speech with ElevenLabs
+            audio_gen = self._elevenlabs_client.text_to_speech.convert(
+                text=text,
+                voice_id=TTS_VOICE_ID,
+                model_id=TTS_MODEL_ID,
+                output_format=TTS_OUTPUT_FORMAT,
+            )
+            audio_bytes = b''.join(audio_gen)
+
+            # Convert MP3 to WAV via ffmpeg
+            process = subprocess.Popen(
+                [
+                    'ffmpeg', '-i', 'pipe:0',
+                    '-f', 'wav', '-acodec', 'pcm_s16le',
+                    '-ar', str(AUDIO_RATE),
+                    '-ac', '2',  # Stereo for ESP32 DAC
+                    'pipe:1',
+                ],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+            )
+            wav_data, _ = process.communicate(input=audio_bytes)
+
+            # Stream WAV PCM data to ESP32
+            wf = wave.open(io.BytesIO(wav_data), 'rb')
+            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+
+            esp32_addr = (self.args.esp32_host, self.args.esp32_audio_port)
+            print(f"Streaming TTS to ESP32 at {esp32_addr} "
+                  f"({wf.getnframes() / wf.getframerate():.1f}s)")
+
+            while True:
+                data = wf.readframes(TTS_FRAMES_PER_PACKET)
+                if not data:
+                    break
+                sock.sendto(data, esp32_addr)
+                time.sleep(TTS_FRAMES_PER_PACKET / AUDIO_RATE * 0.8)
+
+            wf.close()
+            sock.close()
+            print("TTS streaming complete.")
+
+        except Exception as e:
+            print(f"TTS/streaming error: {e}")
+
+    def _append_vlm_message(self, msg):
+        """Thread-safe append to VLM messages (shown in GUI log)."""
+        with self._vlm_lock:
+            self._vlm_messages.append(msg)
+            if len(self._vlm_messages) > self._vlm_max_messages:
+                self._vlm_messages = self._vlm_messages[
+                    -self._vlm_max_messages:]
+                self._vlm_rendered_count = min(
+                    self._vlm_rendered_count, len(self._vlm_messages))
 
     # -- GUI layout --
 
@@ -328,7 +645,6 @@ class ReceiverJetsonApp:
         panels = ttk.Frame(self.root)
         panels.pack(padx=4, pady=(4, 2), fill="both", expand=True)
 
-        # Left panel: original camera feed
         left = ttk.Frame(panels)
         left.pack(side="left", padx=(0, 4), fill="both", expand=True)
         ttk.Label(left, text="Camera Feed (Original)",
@@ -338,7 +654,6 @@ class ReceiverJetsonApp:
         self.feed_canvas.pack(fill="both", expand=True)
         self._feed_photo = None
 
-        # Right panel: Jetson processed
         right = ttk.Frame(panels)
         right.pack(side="left", padx=(4, 0), fill="both", expand=True)
         ttk.Label(right, text="Jetson Processed",
@@ -375,7 +690,15 @@ class ReceiverJetsonApp:
                                       style="Warn.TLabel")
         self.status_label.pack(side="left")
 
-        # Temperature display (always visible, right side of status bar)
+        # Voice AI state indicator
+        self.voice_var = tk.StringVar(value="Voice: Listening")
+        style.configure("Voice.TLabel", font=("sans-serif", 9, "bold"),
+                         foreground="#b4befe", background="#1e1e2e")
+        self.voice_label = ttk.Label(status_frame, textvariable=self.voice_var,
+                                     style="Voice.TLabel")
+        self.voice_label.pack(side="right", padx=(8, 0))
+
+        # Temperature display
         self.temp_var = tk.StringVar(value="Temp: --")
         style.configure("Temp.TLabel", font=("sans-serif", 9, "bold"),
                          foreground="#f38ba8", background="#1e1e2e")
@@ -467,9 +790,15 @@ class ReceiverJetsonApp:
         with self._temp_lock:
             temp = self._temp_c
         if temp is not None:
-            self.temp_var.set(f"Temp: {temp:.1f}°C / {temp * 9 / 5 + 32:.1f}°F")
+            self.temp_var.set(
+                f"Temp: {temp:.1f}\u00b0C / {temp * 9 / 5 + 32:.1f}\u00b0F")
         elif self._sensor_path is None:
             self.temp_var.set("Temp: no sensor")
+
+        # Update voice state
+        with self._voice_lock:
+            voice_state = self._voice_state
+        self.voice_var.set(f"Voice: {voice_state}")
 
         self.root.after(50, self._update_display)
 
@@ -512,7 +841,9 @@ class ReceiverJetsonApp:
 
 def main():
     ap = argparse.ArgumentParser(
-        description="Base Station: camera receiver with Jetson forwarding")
+        description="Base Station: camera receiver + Jetson forwarding + "
+                    "Voice AI pipeline")
+    # Video args (same as receiver_jetson.py)
     ap.add_argument("--port", type=int, default=9000,
                     help="UDP port to receive camera frames (default 9000)")
     ap.add_argument("--jetson-host", default="192.168.55.1",
@@ -524,10 +855,19 @@ def main():
                          "(default 9002)")
     ap.add_argument("--vlm-port", type=int, default=9003,
                     help="UDP port to receive VLM analysis text (default 9003)")
+
+    # Audio / Voice AI args
+    ap.add_argument("--audio-port", type=int, default=12345,
+                    help="UDP port to receive ESP32 mic audio (default 12345)")
+    ap.add_argument("--esp32-host", default="172.20.10.12",
+                    help="ESP32 IP for TTS playback (default 172.20.10.12)")
+    ap.add_argument("--esp32-audio-port", type=int, default=12345,
+                    help="UDP port to send TTS audio to ESP32 (default 12345)")
+
     args = ap.parse_args()
 
     root = tk.Tk()
-    ReceiverJetsonApp(root, args)
+    ReceiverJetsonFullApp(root, args)
     root.mainloop()
 
 

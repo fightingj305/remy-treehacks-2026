@@ -2,6 +2,8 @@
 receiver_jetson.py — Runs on the Base Station RPi.
 Receives camera frames via UDP, forwards to Jetson Nano for processing,
 receives processed frames back, and displays both side-by-side.
+Also receives VLM analysis text from the Jetson and displays it in a
+scrollable log widget.
 
 Usage:
     python3 receiver_jetson.py --port 9000 --jetson-host 192.168.55.1
@@ -24,9 +26,11 @@ from PIL import Image, ImageTk
 
 # Display size for each panel — sized to fit 800x480 DSI display
 DISPLAY_W = 380
-DISPLAY_H = 260
+DISPLAY_H = 200
 
 MAX_UDP_RECV = 65535
+
+VLM_LOG_LINES = 8
 
 
 # ---------------------------------------------------------------------------
@@ -76,6 +80,12 @@ class ReceiverJetsonApp:
         self._camera_fps_time = time.monotonic()
         self._jetson_fps_time = time.monotonic()
 
+        # VLM message state
+        self._vlm_messages = []
+        self._vlm_lock = threading.Lock()
+        self._vlm_max_messages = 50
+        self._vlm_rendered_count = 0
+
         # Socket for forwarding to Jetson (created once, used by camera thread)
         self._fwd_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self._fwd_sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF,
@@ -90,6 +100,7 @@ class ReceiverJetsonApp:
     def _start_network_threads(self):
         threading.Thread(target=self._camera_recv_loop, daemon=True).start()
         threading.Thread(target=self._jetson_recv_loop, daemon=True).start()
+        threading.Thread(target=self._vlm_recv_loop, daemon=True).start()
 
     def _camera_recv_loop(self):
         """Receive camera frames on --port, decode for display, forward to Jetson."""
@@ -198,6 +209,36 @@ class ReceiverJetsonApp:
 
         sock.close()
 
+    def _vlm_recv_loop(self):
+        """Receive VLM analysis text from Jetson on --vlm-port."""
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        sock.bind(("0.0.0.0", self.args.vlm_port))
+        print(f"Listening for VLM analysis on UDP port {self.args.vlm_port} ...")
+
+        while self.running:
+            sock.settimeout(1.0)
+            try:
+                data, addr = sock.recvfrom(MAX_UDP_RECV)
+            except socket.timeout:
+                continue
+            except OSError:
+                continue
+
+            try:
+                msg = data.decode("utf-8")
+            except UnicodeDecodeError:
+                continue
+
+            with self._vlm_lock:
+                self._vlm_messages.append(msg)
+                if len(self._vlm_messages) > self._vlm_max_messages:
+                    self._vlm_messages = self._vlm_messages[-self._vlm_max_messages:]
+                    self._vlm_rendered_count = min(
+                        self._vlm_rendered_count, len(self._vlm_messages))
+
+        sock.close()
+
     # -- GUI layout --
 
     def _build_gui(self):
@@ -238,6 +279,24 @@ class ReceiverJetsonApp:
                                        bg="#181825", highlightthickness=0)
         self.result_canvas.pack(fill="both", expand=True)
         self._result_photo = None
+
+        # -- VLM Analysis Log --
+        vlm_frame = ttk.Frame(self.root)
+        vlm_frame.pack(padx=4, pady=(2, 2), fill="x")
+        ttk.Label(vlm_frame, text="VLM Analysis Log",
+                  style="Header.TLabel").pack(anchor="w")
+        self.vlm_text = tk.Text(
+            vlm_frame,
+            height=VLM_LOG_LINES,
+            font=("monospace", 7),
+            bg="#181825",
+            fg="#cdd6f4",
+            insertbackground="#cdd6f4",
+            relief="flat",
+            wrap="word",
+            state="disabled",
+        )
+        self.vlm_text.pack(fill="x")
 
         # -- Status bar --
         status_frame = ttk.Frame(self.root)
@@ -297,6 +356,17 @@ class ReceiverJetsonApp:
             self._result_photo = photo
             self.result_canvas.delete("all")
             self.result_canvas.create_image(cw // 2, ch // 2, image=photo)
+
+        # Append new VLM messages to text widget
+        with self._vlm_lock:
+            new_msgs = self._vlm_messages[self._vlm_rendered_count:]
+            self._vlm_rendered_count = len(self._vlm_messages)
+        if new_msgs:
+            self.vlm_text.configure(state="normal")
+            for msg in new_msgs:
+                self.vlm_text.insert("end", msg + "\n")
+            self.vlm_text.see("end")
+            self.vlm_text.configure(state="disabled")
 
         # Update status bar
         if not self._camera_connected:
@@ -368,6 +438,8 @@ def main():
     ap.add_argument("--return-port", type=int, default=9002,
                     help="UDP port to receive processed frames from Jetson "
                          "(default 9002)")
+    ap.add_argument("--vlm-port", type=int, default=9003,
+                    help="UDP port to receive VLM analysis text (default 9003)")
     args = ap.parse_args()
 
     root = tk.Tk()

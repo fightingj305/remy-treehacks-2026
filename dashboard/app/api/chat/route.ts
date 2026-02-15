@@ -5,6 +5,56 @@ const anthropic = new Anthropic({
   apiKey: process.env.ANTHROPIC_API_KEY,
 });
 
+const PIXABAY_API_KEY = process.env.PIXABAY_API_KEY;
+const PLACEHOLDER_IMAGE = '/images/dishes/placeholder.png';
+
+interface PixabayHit {
+  id: number;
+  webformatURL: string;
+  largeImageURL: string;
+  previewURL: string;
+}
+
+interface PixabayResponse {
+  total: number;
+  totalHits: number;
+  hits: PixabayHit[];
+}
+
+async function fetchFoodImage(mealName: string): Promise<string> {
+  if (!PIXABAY_API_KEY) {
+    console.warn('PIXABAY_API_KEY not set, using placeholder image');
+    return PLACEHOLDER_IMAGE;
+  }
+
+  try {
+    const url = new URL('https://pixabay.com/api/');
+    url.searchParams.set('key', PIXABAY_API_KEY);
+    url.searchParams.set('q', mealName);
+    url.searchParams.set('image_type', 'photo');
+    url.searchParams.set('category', 'food');
+    url.searchParams.set('per_page', '3');
+
+    const response = await fetch(url.toString());
+
+    if (!response.ok) {
+      console.error(`Pixabay API error: ${response.status}`);
+      return PLACEHOLDER_IMAGE;
+    }
+
+    const data: PixabayResponse = await response.json();
+
+    if (data.hits && data.hits.length > 0) {
+      return data.hits[0].webformatURL;
+    }
+
+    return PLACEHOLDER_IMAGE;
+  } catch (error) {
+    console.error('Error fetching image from Pixabay:', error);
+    return PLACEHOLDER_IMAGE;
+  }
+}
+
 export async function POST(request: NextRequest) {
   try {
     const { message, preferences } = await request.json();
@@ -77,6 +127,20 @@ Make sure the meal names are specific and appealing. Consider the user's prefere
         recommendations: [],
         message: textContent.text,
       };
+    }
+
+    // Fetch images from Pixabay for each recommendation
+    if (parsedResponse.recommendations && parsedResponse.recommendations.length > 0) {
+      const recommendationsWithImages = await Promise.all(
+        parsedResponse.recommendations.map(async (rec: any) => {
+          const imageUrl = await fetchFoodImage(rec.name);
+          return {
+            ...rec,
+            imageUrl,
+          };
+        })
+      );
+      parsedResponse.recommendations = recommendationsWithImages;
     }
 
     return NextResponse.json(parsedResponse);

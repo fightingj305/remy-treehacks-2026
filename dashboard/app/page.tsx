@@ -1,7 +1,8 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import PreferencesModal from '@/components/PreferencesModal';
+import RecommendationCard, { RecommendationCardSkeleton } from '@/components/RecommendationCard';
 
 interface Recommendation {
   id: number;
@@ -14,18 +15,76 @@ export default function Dashboard() {
   const [isSidebarOpen, setIsSidebarOpen] = useState(true);
   const [sidebarAnimationKey, setSidebarAnimationKey] = useState(0);
   const [userPreferences, setUserPreferences] = useState<string[]>([
-    'Low Sugar',
-    'Low Sodium',
-    'Medium Rare'
+    'Nut Free',
+    'Keto',
+    'No Spicy'
   ]);
   const [userInput, setUserInput] = useState('');
   const [recommendations, setRecommendations] = useState<Recommendation[]>([
     { id: 1, name: 'Spaghetti', imageUrl: '/images/dishes/spaghetti.png' },
-    { id: 2, name: 'Spaghetti', imageUrl: '/images/dishes/spaghetti.png' },
-    { id: 3, name: 'Spaghetti', imageUrl: '/images/dishes/spaghetti.png' },
+    { id: 2, name: 'Egg Veggie Bowl', imageUrl: '/images/dishes/egg-veggie-bowl.png' },
+    { id: 3, name: 'KBBQ Beef', imageUrl: '/images/dishes/kbbq-beef.png' },
   ]);
   const [isLoading, setIsLoading] = useState(false);
   const [aiMessage, setAiMessage] = useState('');
+
+  // Typing animation states
+  const [placeholderText, setPlaceholderText] = useState('');
+  const [currentPromptIndex, setCurrentPromptIndex] = useState(0);
+  const [isTyping, setIsTyping] = useState(true);
+  const [charIndex, setCharIndex] = useState(0);
+
+  const prompts = [
+    "I want to cook a high-protein meal with chicken and vegetables",
+    "I want to cook something vegan using whatever's in season right now",
+    "I want to cook a keto-friendly dinner that's under 30 minutes",
+    "I want to cook a traditional Korean dish but make it halal",
+    "I want to cook a low-sodium Mediterranean seafood pasta for two"
+  ];
+
+  // Typing animation effect
+  useEffect(() => {
+    if (userInput !== '') {
+      setPlaceholderText('');
+      return; // Don't animate if user has typed something
+    }
+
+    const currentPrompt = prompts[currentPromptIndex];
+
+    if (isTyping) {
+      // Typing phase
+      if (charIndex <= currentPrompt.length) {
+        const timeout = setTimeout(() => {
+          setPlaceholderText(currentPrompt.substring(0, charIndex));
+          setCharIndex(charIndex + 1);
+        }, 50); // Type each character every 50ms
+
+        return () => clearTimeout(timeout);
+      } else {
+        // Finished typing, pause before erasing
+        const pauseTimeout = setTimeout(() => {
+          setIsTyping(false);
+        }, 2000); // Pause for 2 seconds
+
+        return () => clearTimeout(pauseTimeout);
+      }
+    } else {
+      // Erasing phase
+      if (charIndex > 0) {
+        const timeout = setTimeout(() => {
+          setPlaceholderText(currentPrompt.substring(0, charIndex - 1));
+          setCharIndex(charIndex - 1);
+        }, 30); // Erase faster than typing
+
+        return () => clearTimeout(timeout);
+      } else {
+        // Finished erasing, move to next prompt
+        setCurrentPromptIndex((prev) => (prev + 1) % prompts.length);
+        setIsTyping(true);
+        setCharIndex(0);
+      }
+    }
+  }, [currentPromptIndex, isTyping, userInput, prompts, charIndex]);
 
   const handleSavePreferences = (preferences: string[]) => {
     setUserPreferences(preferences);
@@ -84,13 +143,15 @@ export default function Dashboard() {
   };
 
   return (
-    <div className="flex min-h-screen bg-gray-50">
-      {/* Main Content */}
-      <main
-        className={`flex-1 p-12 transition-all duration-300 flex flex-col justify-center ${
-          isSidebarOpen ? 'max-w-4xl' : 'max-w-4xl mx-auto'
-        }`}
-      >
+    <div className="min-h-screen bg-gray-50">
+      {/* Responsive Container */}
+      <div className="flex min-h-screen max-w-[1920px] mx-auto">
+        {/* Main Content */}
+        <main
+          className={`flex-1 px-6 py-12 md:px-12 lg:px-24 xl:px-32 2xl:px-48 transition-all duration-300 flex flex-col justify-center ${
+            isSidebarOpen ? '' : 'mx-auto'
+          }`}
+        >
         {/* Logo */}
         <div className="mb-8 flex justify-center">
           <img
@@ -133,18 +194,27 @@ export default function Dashboard() {
             {/* Text Input */}
             <div className="flex-1 relative">
               {userInput === '' && (
-                <div className="absolute inset-0 flex items-center pointer-events-none">
+                <div className="absolute top-0 left-0 flex items-start pt-1 pointer-events-none">
                   <span className="text-lg text-gray-400">
-                    I want to cook <span className="animate-blink">|</span>
+                    {placeholderText}<span className="animate-blink">|</span>
                   </span>
                 </div>
               )}
-              <input
-                type="text"
+              <textarea
                 value={userInput}
                 onChange={(e) => setUserInput(e.target.value)}
-                onKeyDown={(e) => e.key === 'Enter' && handleSubmit()}
-                className="w-full text-lg text-black outline-none bg-transparent"
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' && !e.shiftKey) {
+                    e.preventDefault();
+                    handleSubmit();
+                  }
+                }}
+                className="w-full text-lg text-black outline-none bg-transparent resize-none overflow-y-auto"
+                style={{
+                  height: 'calc(1.5rem * 1.5 * 2)', // Fixed 2 lines (font-size * line-height * lines)
+                  lineHeight: '1.5',
+                }}
+                rows={2}
               />
             </div>
 
@@ -185,39 +255,47 @@ export default function Dashboard() {
             </button>
           </div>
         </div>
-      </main>
+        </main>
 
-      {/* Sidebar Toggle Button (when closed) */}
-      {!isSidebarOpen && (
-        <button
-          onClick={() => {
-            setIsSidebarOpen(true);
-            setSidebarAnimationKey(prev => prev + 1);
-          }}
-          className="fixed top-8 right-8 p-3 rounded-full transition-colors z-30 text-gray-600 hover:text-gray-900"
-          style={{ backgroundColor: 'transparent' }}
-          onMouseEnter={(e) => e.currentTarget.style.backgroundColor = '#E5E5E5'}
-          onMouseLeave={(e) => e.currentTarget.style.backgroundColor = 'transparent'}
-        >
-          <svg
-            width="24"
-            height="24"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            strokeWidth="2"
+        {/* Sidebar Toggle Button (when closed) */}
+        {!isSidebarOpen && (
+          <button
+            onClick={() => {
+              setIsSidebarOpen(true);
+              setSidebarAnimationKey(prev => prev + 1);
+            }}
+            className="fixed top-8 right-8 p-3 rounded-full transition-colors z-30 text-gray-600 hover:text-gray-900"
+            style={{ backgroundColor: 'transparent' }}
+            onMouseEnter={(e) => e.currentTarget.style.backgroundColor = '#E5E5E5'}
+            onMouseLeave={(e) => e.currentTarget.style.backgroundColor = 'transparent'}
           >
-            <path d="M15 18l-6-6 6-6" />
-          </svg>
-        </button>
-      )}
+            <svg
+              width="24"
+              height="24"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+            >
+              <path d="M15 18l-6-6 6-6" />
+            </svg>
+          </button>
+        )}
 
-      {/* Right Sidebar */}
-      <aside
-        className={`bg-white border-l border-gray-200 transition-all duration-300 relative ${
-          isSidebarOpen ? 'w-96' : 'w-0 overflow-hidden'
-        }`}
-      >
+        {/* Mobile Backdrop Overlay */}
+        {isSidebarOpen && (
+          <div
+            className="fixed inset-0 bg-black bg-opacity-25 z-40 md:hidden"
+            onClick={() => setIsSidebarOpen(false)}
+          />
+        )}
+
+        {/* Right Sidebar */}
+        <aside
+          className={`bg-white border-l border-gray-200 transition-all duration-300
+            ${isSidebarOpen ? 'fixed md:relative right-0 top-0 h-full w-80 md:w-96 z-50' : 'w-0 overflow-hidden'}
+            md:relative md:h-auto`}
+        >
         {isSidebarOpen && (
           <>
             {/* Fixed Close Button */}
@@ -278,76 +356,32 @@ export default function Dashboard() {
                 <div>
                   <h2 className="text-sm text-gray-600 mb-4 uppercase font-medium">RECOMMENDATIONS</h2>
                   <div className="space-y-4">
-                    {recommendations.map((item) => (
-                      <div
-                        key={item.id}
-                        className="rounded-2xl overflow-hidden cursor-pointer transition-all duration-300 hover:shadow-xl relative group"
-                      >
-                        <div
-                          className="h-32 relative flex items-end justify-between p-4"
-                          style={{
-                            backgroundImage: `url(${item.imageUrl})`,
-                            backgroundSize: 'cover',
-                            backgroundPosition: 'center',
-                            backgroundColor: '#ccc',
-                          }}
-                        >
-                          {/* Progressive blur overlay */}
-                          <div
-                            className="absolute inset-0"
-                            style={{
-                              backdropFilter: 'blur(4px)',
-                              WebkitBackdropFilter: 'blur(4px)',
-                              maskImage:
-                                'linear-gradient(to top, rgba(0, 0, 0, 1), rgba(0, 0, 0, 0))',
-                              WebkitMaskImage:
-                                'linear-gradient(to top, rgba(0, 0, 0, 1), rgba(0, 0, 0, 0))',
-                            }}
-                          ></div>
-
-                          {/* Dark gradient overlay */}
-                          <div
-                            className="absolute inset-0"
-                            style={{
-                              background:
-                                'linear-gradient(to top, rgba(0, 0, 0, 0.7), rgba(0, 0, 0, 0.3))',
-                            }}
-                          ></div>
-
-                          {/* Hover overlay - darker backdrop */}
-                          <div className="absolute inset-0 bg-black opacity-0 group-hover:opacity-20 transition-opacity duration-300"></div>
-
-                          {/* Meal name */}
-                          <h3 className="relative z-10 text-white text-lg font-medium">
-                            {item.name}
-                          </h3>
-
-                          {/* Cook button */}
-                          <button className="relative z-10 flex flex-col items-center gap-1 transition-transform duration-300 group-hover:-translate-y-2 group-hover:scale-110">
-                            <div className="bg-black p-2 rounded-full transition-colors group-hover:bg-[#AF431D]">
-                              <svg
-                                width="20"
-                                height="20"
-                                viewBox="0 0 24 24"
-                                fill="none"
-                                stroke="white"
-                                strokeWidth="2"
-                              >
-                                <path d="M12 19V5M5 12l7-7 7 7" />
-                              </svg>
-                            </div>
-                            <span className="text-white text-sm font-medium">Cook</span>
-                          </button>
-                        </div>
-                      </div>
-                    ))}
+                    {isLoading ? (
+                      // Show loading skeletons while fetching recommendations
+                      <>
+                        <RecommendationCardSkeleton />
+                        <RecommendationCardSkeleton />
+                        <RecommendationCardSkeleton />
+                      </>
+                    ) : (
+                      // Show actual recommendations
+                      recommendations.map((item) => (
+                        <RecommendationCard
+                          key={item.id}
+                          name={item.name}
+                          imageUrl={item.imageUrl}
+                          onCook={() => console.log('Cook:', item.name)}
+                        />
+                      ))
+                    )}
                   </div>
                 </div>
               </div>
             </div>
           </>
         )}
-      </aside>
+        </aside>
+      </div>
 
       {/* Preferences Modal */}
       <PreferencesModal

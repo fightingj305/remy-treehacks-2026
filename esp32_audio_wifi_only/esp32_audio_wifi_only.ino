@@ -1,6 +1,8 @@
 #include <WiFi.h>
 #include <WiFiUdp.h>
 #include <driver/i2s.h>
+#include <OneWire.h>
+#include <DallasTemperature.h>
 
 // --- WiFi ---
 const char* ssid = "allenw";
@@ -29,6 +31,21 @@ const uint16_t localPort = 12345;
 #define UDP_BUFFER_SIZE 1024
 uint8_t udpBuffer[UDP_BUFFER_SIZE];       // for incoming audio
 int16_t micBuffer[512];                   // for sending mic audio
+
+// --- DS18B20 - MOVED TO GPIO 4 (GPIO 22 conflicts with I2S) ---
+#define ONE_WIRE_BUS 4
+OneWire oneWire(ONE_WIRE_BUS);
+DallasTemperature sensors(&oneWire);
+
+enum TempState { IDLE, WAITING_CONVERSION };
+TempState tempState = IDLE;
+unsigned long conversionStartTime = 0;
+const unsigned long TEMP_READ_INTERVAL = 2000;  // Read every 2 seconds
+const unsigned long CONVERSION_TIME = 200;      // 9-bit resolution = 93.75ms
+unsigned long lastTempRead = 0;
+float lastTempC = -127;
+DeviceAddress tempSensor;
+bool sensorInit = false;
 
 void setup() {
     Serial.begin(115200);
@@ -94,9 +111,64 @@ void setup() {
 
     i2s_driver_install(I2S_MIC, &micConfig, 0, NULL);
     i2s_set_pin(I2S_MIC, &micPins);
+    
+    // --- Temperature Sensor Init ---
+    delay(100);
+    Serial.println("\nInitializing DS18B20 on GPIO 4...");
+    sensors.begin();
+    
+    int deviceCount = sensors.getDeviceCount();
+    Serial.printf("Found %d temperature sensor(s)\n", deviceCount);
+    
+    if (deviceCount > 0) {
+        if (sensors.getAddress(tempSensor, 0)) {
+            Serial.print("Sensor address: ");
+            for (uint8_t i = 0; i < 8; i++) {
+                Serial.printf("%02X ", tempSensor[i]);
+            }
+            Serial.println();
+            
+            sensors.setResolution(tempSensor, 9);  // 9-bit = 93.75ms conversion
+            sensors.setWaitForConversion(false);   // Non-blocking mode
+            sensorInit = true;
+            Serial.println("Temperature sensor ready!");
+        } else {
+            Serial.println("ERROR: Could not get sensor address");
+        }
+    } else {
+        Serial.println("WARNING: No sensors found - check wiring on GPIO 4");
+    }
 }
 
 void loop() {
+    unsigned long now = millis();
+    
+    // --- Non-blocking temperature state machine ---
+    if (sensorInit) {
+        switch (tempState) {
+            case IDLE:
+                if (now - lastTempRead >= TEMP_READ_INTERVAL) {
+                    sensors.requestTemperaturesByAddress(tempSensor);
+                    conversionStartTime = now;
+                    tempState = WAITING_CONVERSION;
+                }
+                break;
+                
+            case WAITING_CONVERSION:
+                if (now - conversionStartTime >= CONVERSION_TIME) {
+                    float tempC = sensors.getTempC(tempSensor);
+                    
+                    if (tempC > -55 && tempC < 125) {  // DS18B20 valid range
+                        lastTempC = tempC;
+                        Serial.printf("Temperature: %.2f°C\n", tempC);
+                    }
+                    lastTempRead = now;
+                    tempState = IDLE;
+                }
+                break;
+        }
+    }
+    
     // --- Receive UDP audio and play over DAC ---
     int packetSize = udpIn.parsePacket();
     if (packetSize > 0) {
@@ -114,7 +186,4 @@ void loop() {
         udpOut.write((uint8_t*)micBuffer, bytesRead);
         udpOut.endPacket();
     }
-
-    // Tiny delay to prevent starving tasks
-    delay(1);
 }

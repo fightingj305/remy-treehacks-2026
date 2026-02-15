@@ -18,6 +18,7 @@ Usage:
 import argparse
 import glob as globmod
 import io
+import json
 import os
 import socket
 import struct
@@ -81,6 +82,9 @@ CLAUDE_SYSTEM_PROMPT = (
 # TTS streaming to ESP32
 TTS_MAX_PACKET_SIZE = 1024
 TTS_FRAMES_PER_PACKET = TTS_MAX_PACKET_SIZE // (AUDIO_SAMPLE_WIDTH * 2)  # stereo
+
+# Recipe TCP server
+RECIPE_PORT = 9005
 
 # ---------------------------------------------------------------------------
 # DS18B20 temperature sensor helpers
@@ -202,6 +206,11 @@ class ReceiverJetsonFullApp:
         self._voice_state = "Listening"
         self._voice_lock = threading.Lock()
 
+        # Recipe steps state
+        self._recipe_steps = []
+        self._recipe_lock = threading.Lock()
+        self._recipe_rendered_count = 0
+
         # Socket for forwarding to Jetson
         self._fwd_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self._fwd_sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF,
@@ -238,6 +247,7 @@ class ReceiverJetsonFullApp:
         threading.Thread(target=self._jetson_recv_loop, daemon=True).start()
         threading.Thread(target=self._vlm_recv_loop, daemon=True).start()
         threading.Thread(target=self._audio_recv_loop, daemon=True).start()
+        threading.Thread(target=self._recipe_tcp_loop, daemon=True).start()
         if self._sensor_path:
             threading.Thread(target=self._temp_poll_loop, daemon=True).start()
 
@@ -385,6 +395,86 @@ class ReceiverJetsonFullApp:
 
         sock.close()
 
+    def _recipe_tcp_loop(self):
+        """TCP server for receiving recipe steps (length-prefixed JSON)."""
+        server_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        server_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        server_sock.bind(("0.0.0.0", self.args.recipe_port))
+        server_sock.listen(5)
+        print(f"Recipe TCP server listening on port {self.args.recipe_port} ...")
+
+        while self.running:
+            server_sock.settimeout(1.0)
+            try:
+                client_sock, addr = server_sock.accept()
+            except socket.timeout:
+                continue
+            except OSError:
+                break
+
+            # Handle client in a separate thread to avoid blocking
+            threading.Thread(
+                target=self._handle_recipe_client,
+                args=(client_sock, addr),
+                daemon=True,
+            ).start()
+
+        server_sock.close()
+
+    def _handle_recipe_client(self, client_sock, addr):
+        """Handle a single recipe TCP client connection."""
+        try:
+            # Read 4-byte length header
+            header = client_sock.recv(4)
+            if len(header) != 4:
+                print(f"Recipe connection from {addr}: incomplete header")
+                client_sock.close()
+                return
+
+            payload_len = struct.unpack('>I', header)[0]
+            if payload_len > 10 * 1024 * 1024:  # 10 MB max
+                print(f"Recipe connection from {addr}: payload too large ({payload_len} bytes)")
+                client_sock.close()
+                return
+
+            # Read payload
+            payload = b''
+            while len(payload) < payload_len:
+                chunk = client_sock.recv(min(4096, payload_len - len(payload)))
+                if not chunk:
+                    break
+                payload += chunk
+
+            if len(payload) != payload_len:
+                print(f"Recipe connection from {addr}: incomplete payload "
+                      f"(got {len(payload)}, expected {payload_len})")
+                client_sock.close()
+                return
+
+            # Parse JSON array
+            try:
+                recipe_steps = json.loads(payload.decode('utf-8'))
+                if not isinstance(recipe_steps, list):
+                    print(f"Recipe connection from {addr}: payload is not an array")
+                    client_sock.close()
+                    return
+
+                # Update recipe steps
+                with self._recipe_lock:
+                    self._recipe_steps = recipe_steps
+                    self._recipe_rendered_count = 0
+
+                print(f"Received recipe from {addr} with {len(recipe_steps)} steps")
+                self._append_vlm_message(f"[RECIPE] Received recipe with {len(recipe_steps)} steps")
+
+            except (json.JSONDecodeError, UnicodeDecodeError) as e:
+                print(f"Recipe connection from {addr}: JSON decode error: {e}")
+
+        except Exception as e:
+            print(f"Recipe connection from {addr}: error: {e}")
+        finally:
+            client_sock.close()
+
     # -- Audio / Voice AI threads --
 
     def _audio_recv_loop(self):
@@ -486,15 +576,18 @@ class ReceiverJetsonFullApp:
         print(f"Transcription: {transcription}")
         self._append_vlm_message(f"[USER] {transcription}")
 
-        # --- Step 2: Build context from VLM messages ---
+        # --- Step 2: Build context from VLM messages and recipe steps ---
         with self._voice_lock:
             self._voice_state = "Thinking..."
 
         with self._vlm_lock:
             vlm_context = "\n".join(self._vlm_messages[-20:])
 
+        with self._recipe_lock:
+            recipe_steps = list(self._recipe_steps)
+
         # --- Step 3: Query Claude ---
-        response_text = self._query_claude(transcription, vlm_context)
+        response_text = self._query_claude(transcription, vlm_context, recipe_steps)
         if not response_text:
             print("No Claude response, returning to listening.")
             with self._voice_lock:
@@ -542,14 +635,26 @@ class ReceiverJetsonFullApp:
             print(f"STT error: {e}")
             return None
 
-    def _query_claude(self, question, vlm_context):
-        """Query Claude with the user's question and VLM scene context."""
-        if vlm_context:
-            user_message = (
-                f"Here is the recent visual scene analysis log from the "
-                f"kitchen camera:\n\n{vlm_context}\n\n"
-                f"User question: {question}"
+    def _query_claude(self, question, vlm_context, recipe_steps):
+        """Query Claude with the user's question, VLM scene context, and recipe steps."""
+        context_parts = []
+
+        if recipe_steps:
+            recipe_text = "\n".join(
+                f"{i}. {step}" for i, step in enumerate(recipe_steps, 1)
             )
+            context_parts.append(
+                f"The user is following this recipe:\n\n{recipe_text}\n"
+            )
+
+        if vlm_context:
+            context_parts.append(
+                f"Here is the recent visual scene analysis log from the "
+                f"kitchen camera:\n\n{vlm_context}\n"
+            )
+
+        if context_parts:
+            user_message = "\n".join(context_parts) + f"\nUser question: {question}"
         else:
             user_message = f"User question: {question}"
 
@@ -681,6 +786,24 @@ class ReceiverJetsonFullApp:
         )
         self.vlm_text.pack(fill="x")
 
+        # -- Recipe Steps Display --
+        recipe_frame = ttk.Frame(self.root)
+        recipe_frame.pack(padx=4, pady=(2, 2), fill="x")
+        ttk.Label(recipe_frame, text="Recipe Steps",
+                  style="Header.TLabel").pack(anchor="w")
+        self.recipe_text = tk.Text(
+            recipe_frame,
+            height=4,
+            font=("monospace", 8),
+            bg="#181825",
+            fg="#a6e3a1",
+            insertbackground="#a6e3a1",
+            relief="flat",
+            wrap="word",
+            state="disabled",
+        )
+        self.recipe_text.pack(fill="x")
+
         # -- Status bar --
         status_frame = ttk.Frame(self.root)
         status_frame.pack(padx=4, fill="x")
@@ -766,6 +889,19 @@ class ReceiverJetsonFullApp:
                 self.vlm_text.insert("end", msg + "\n")
             self.vlm_text.see("end")
             self.vlm_text.configure(state="disabled")
+
+        # Render recipe steps
+        with self._recipe_lock:
+            recipe_steps = list(self._recipe_steps)
+            recipe_rendered_count = self._recipe_rendered_count
+        if recipe_rendered_count == 0 and recipe_steps:
+            self.recipe_text.configure(state="normal")
+            self.recipe_text.delete("1.0", "end")
+            for i, step in enumerate(recipe_steps, 1):
+                self.recipe_text.insert("end", f"{i}. {step}\n")
+            self.recipe_text.configure(state="disabled")
+            with self._recipe_lock:
+                self._recipe_rendered_count = 1
 
         # Update status bar
         if not self._camera_connected:
@@ -863,6 +999,10 @@ def main():
                     help="ESP32 IP for TTS playback (default 172.20.10.12)")
     ap.add_argument("--esp32-audio-port", type=int, default=12345,
                     help="UDP port to send TTS audio to ESP32 (default 12345)")
+
+    # Recipe TCP server args
+    ap.add_argument("--recipe-port", type=int, default=9005,
+                    help="TCP port to receive recipe steps (default 9005)")
 
     args = ap.parse_args()
 

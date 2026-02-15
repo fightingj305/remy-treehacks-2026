@@ -30,10 +30,47 @@ const uint16_t localPort = 12345;
 uint8_t udpBuffer[UDP_BUFFER_SIZE];       // for incoming audio
 int16_t micBuffer[512];                   // for sending mic audio
 
+// --- Ring Buffer ---
+#define RING_BUFFER_SIZE 8192  // Adjust size as needed (bigger = more latency but smoother)
+uint8_t ringBuffer[RING_BUFFER_SIZE];
+volatile uint16_t writeIndex = 0;
+volatile uint16_t readIndex = 0;
+volatile uint16_t bufferLevel = 0;
+
+#define PREBUFFER_SIZE 2048  // Wait for this much data before starting playback
+
+bool isPlaying = false;
+
+// Ring buffer functions
+void ringBufferWrite(uint8_t* data, size_t len) {
+    for (size_t i = 0; i < len; i++) {
+        if (bufferLevel < RING_BUFFER_SIZE) {
+            ringBuffer[writeIndex] = data[i];
+            writeIndex = (writeIndex + 1) % RING_BUFFER_SIZE;
+            bufferLevel++;
+        } else {
+            // Buffer overflow - skip oldest data
+            readIndex = (readIndex + 1) % RING_BUFFER_SIZE;
+            ringBuffer[writeIndex] = data[i];
+            writeIndex = (writeIndex + 1) % RING_BUFFER_SIZE;
+        }
+    }
+}
+
+size_t ringBufferRead(uint8_t* data, size_t len) {
+    size_t bytesRead = 0;
+    while (bytesRead < len && bufferLevel > 0) {
+        data[bytesRead++] = ringBuffer[readIndex];
+        readIndex = (readIndex + 1) % RING_BUFFER_SIZE;
+        bufferLevel--;
+    }
+    return bytesRead;
+}
+
 void setup() {
     Serial.begin(115200);
     delay(1000);
-    Serial.println("\n=== UDP Audio Stream ===");
+    Serial.println("\n=== UDP Audio Stream with Ring Buffer ===");
 
     // --- WiFi ---
     WiFi.begin(ssid, password);
@@ -94,16 +131,45 @@ void setup() {
 
     i2s_driver_install(I2S_MIC, &micConfig, 0, NULL);
     i2s_set_pin(I2S_MIC, &micPins);
+    
+    Serial.println("Setup complete!");
 }
 
 void loop() {    
-    // --- Receive UDP audio and play over DAC ---
+    // --- Receive UDP audio and write to ring buffer ---
     int packetSize = udpIn.parsePacket();
     if (packetSize > 0) { 
         if (packetSize > UDP_BUFFER_SIZE) packetSize = UDP_BUFFER_SIZE;
         int len = udpIn.read(udpBuffer, packetSize);
-        size_t written;
-        i2s_write(I2S_DAC, udpBuffer, len, &written, pdMS_TO_TICKS(10));
+        ringBufferWrite(udpBuffer, len);
+        
+        // Start playing once we have enough data buffered
+        if (!isPlaying && bufferLevel >= PREBUFFER_SIZE) {
+            isPlaying = true;
+            Serial.println("Prebuffer filled, starting playback");
+        }
+    }
+
+    // --- Read from ring buffer and play over DAC ---
+    if (isPlaying) {
+        uint8_t playBuffer[512];
+        size_t bytesRead = ringBufferRead(playBuffer, sizeof(playBuffer));
+        
+        if (bytesRead > 0) {
+            size_t written;
+            i2s_write(I2S_DAC, playBuffer, bytesRead, &written, pdMS_TO_TICKS(10));
+        } else {
+            // Buffer underrun - stop playing until buffer fills again
+            isPlaying = false;
+            Serial.println("Buffer underrun, waiting for data...");
+        }
+        
+        // Optional: Monitor buffer level
+        static unsigned long lastPrint = 0;
+        if (millis() - lastPrint > 2000) {
+            Serial.printf("Buffer level: %d/%d bytes\n", bufferLevel, RING_BUFFER_SIZE);
+            lastPrint = millis();
+        }
     }
 
     // --- Read I2S MIC and send to remote ---

@@ -28,7 +28,7 @@ export default function PreferencesPanel({ preferences = [], onEdit }: Preferenc
             </div>
           ))
         ) : (
-          <p className="text-gray-500 italic">No preferences set. Click Edit to add some.</p>
+          <p className="text-gray-500 italic">No preferences set. Click "edit" to add some.</p>
         )}
       </div>
     </div>

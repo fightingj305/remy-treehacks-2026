@@ -12,19 +12,13 @@ interface Recommendation {
 
 export default function Dashboard() {
   const [isPreferencesModalOpen, setIsPreferencesModalOpen] = useState(false);
-  const [isSidebarOpen, setIsSidebarOpen] = useState(true);
-  const [sidebarAnimationKey, setSidebarAnimationKey] = useState(0);
   const [userPreferences, setUserPreferences] = useState<string[]>([
     'Nut Free',
     'Keto',
     'No Spicy'
   ]);
   const [userInput, setUserInput] = useState('');
-  const [recommendations, setRecommendations] = useState<Recommendation[]>([
-    { id: 1, name: 'Spaghetti', imageUrl: '/images/dishes/spaghetti.png' },
-    { id: 2, name: 'Egg Veggie Bowl', imageUrl: '/images/dishes/egg-veggie-bowl.png' },
-    { id: 3, name: 'KBBQ Beef', imageUrl: '/images/dishes/kbbq-beef.png' },
-  ]);
+  const [recommendations, setRecommendations] = useState<Recommendation[]>([]);
   const [isLoading, setIsLoading] = useState(false);
   const [aiMessage, setAiMessage] = useState('');
 
@@ -137,21 +131,13 @@ export default function Dashboard() {
     }
   };
 
-  const handleVoiceInput = () => {
-    // TODO: Implement voice input
-    console.log('Voice input activated');
-  };
-
   return (
     <div className="min-h-screen bg-gray-50">
-      {/* Responsive Container */}
-      <div className="flex min-h-screen max-w-[1920px] mx-auto">
-        {/* Main Content */}
-        <main
-          className={`flex-1 px-6 py-12 md:px-12 lg:px-24 xl:px-32 2xl:px-48 transition-all duration-300 flex flex-col justify-center ${
-            isSidebarOpen ? '' : 'mx-auto'
-          }`}
-        >
+      <main className={`max-w-4xl mx-auto px-6 flex flex-col ${
+        recommendations.length === 0 && !isLoading
+          ? 'py-12 justify-center min-h-screen'
+          : 'py-8'
+      }`}>
         {/* Logo */}
         <div className="mb-8 flex justify-center">
           <img
@@ -170,27 +156,7 @@ export default function Dashboard() {
 
         {/* Input Box */}
         <div className="bg-white rounded-2xl p-6 shadow-sm border border-gray-200 mb-8">
-          <div className="flex items-center gap-4">
-            {/* Microphone Button */}
-            <button
-              onClick={handleVoiceInput}
-              className="text-gray-500 hover:text-gray-900 transition-colors p-2"
-            >
-              <svg
-                width="24"
-                height="24"
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="2"
-              >
-                <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z" />
-                <path d="M19 10v2a7 7 0 0 1-14 0v-2" />
-                <line x1="12" y1="19" x2="12" y2="23" />
-                <line x1="8" y1="23" x2="16" y2="23" />
-              </svg>
-            </button>
-
+          <div className="flex items-center gap-4 mb-6">
             {/* Text Input */}
             <div className="flex-1 relative">
               {userInput === '' && (
@@ -254,134 +220,77 @@ export default function Dashboard() {
               )}
             </button>
           </div>
-        </div>
-        </main>
 
-        {/* Sidebar Toggle Button (when closed) */}
-        {!isSidebarOpen && (
-          <button
-            onClick={() => {
-              setIsSidebarOpen(true);
-              setSidebarAnimationKey(prev => prev + 1);
-            }}
-            className="fixed top-8 right-8 p-3 rounded-full transition-colors z-30 text-gray-600 hover:text-gray-900"
-            style={{ backgroundColor: 'transparent' }}
-            onMouseEnter={(e) => e.currentTarget.style.backgroundColor = '#E5E5E5'}
-            onMouseLeave={(e) => e.currentTarget.style.backgroundColor = 'transparent'}
-          >
-            <svg
-              width="24"
-              height="24"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="2"
-            >
-              <path d="M15 18l-6-6 6-6" />
-            </svg>
-          </button>
-        )}
-
-        {/* Mobile Backdrop Overlay */}
-        {isSidebarOpen && (
-          <div
-            className="fixed inset-0 bg-black bg-opacity-25 z-40 md:hidden"
-            onClick={() => setIsSidebarOpen(false)}
-          />
-        )}
-
-        {/* Right Sidebar */}
-        <aside
-          className={`bg-white border-l border-gray-200 transition-all duration-300
-            ${isSidebarOpen ? 'fixed md:relative right-0 top-0 h-full w-80 md:w-96 z-50' : 'w-0 overflow-hidden'}
-            md:relative md:h-auto`}
-        >
-        {isSidebarOpen && (
-          <>
-            {/* Fixed Close Button */}
-            <div className="sticky top-0 z-20 bg-white px-8 pt-8">
+          {/* Preferences */}
+          <div>
+            <div className="flex items-center gap-2 mb-4">
+              <h2 className="text-sm text-gray-600 uppercase font-medium">PREFERENCES</h2>
               <button
-                onClick={() => setIsSidebarOpen(false)}
-                className="mb-6 p-3 rounded-full transition-colors text-gray-600 hover:text-gray-900"
-                style={{ backgroundColor: 'transparent' }}
-                onMouseEnter={(e) => e.currentTarget.style.backgroundColor = '#E5E5E5'}
-                onMouseLeave={(e) => e.currentTarget.style.backgroundColor = 'transparent'}
+                className="p-1 rounded hover:bg-gray-200 transition-colors text-gray-600 hover:text-gray-900"
+                onClick={() => setIsPreferencesModalOpen(true)}
+                aria-label="Edit preferences"
               >
                 <svg
-                  width="24"
-                  height="24"
+                  width="16"
+                  height="16"
                   viewBox="0 0 24 24"
                   fill="none"
                   stroke="currentColor"
                   strokeWidth="2"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
                 >
-                  <path d="M9 18l6-6-6-6" />
+                  <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7" />
+                  <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z" />
                 </svg>
               </button>
             </div>
-
-            {/* Scrollable Content */}
-            <div className="overflow-y-auto px-8 pb-8" style={{ maxHeight: 'calc(100vh - 120px)' }}>
-              <div key={sidebarAnimationKey} className="animate-slideInFromRight">
-                {/* Preferences */}
-                <div className="mb-8">
-                  <div className="flex items-center justify-between mb-4">
-                    <h2 className="text-sm text-gray-600 uppercase font-medium">PREFERENCES</h2>
-                    <button
-                      className="px-4 py-1 rounded-lg text-sm text-gray-600 hover:bg-gray-200 hover:text-gray-900 transition-colors"
-                      onClick={() => setIsPreferencesModalOpen(true)}
-                    >
-                      edit
-                    </button>
+            <div className="flex flex-wrap gap-2">
+              {userPreferences.length > 0 ? (
+                userPreferences.map((preference) => (
+                  <div
+                    key={preference}
+                    className="px-4 py-2 bg-amber-700 text-white rounded-full text-sm font-medium"
+                  >
+                    {preference}
                   </div>
-                  <div className="flex flex-wrap gap-2">
-                    {userPreferences.length > 0 ? (
-                      userPreferences.map((preference) => (
-                        <div
-                          key={preference}
-                          className="px-4 py-2 bg-amber-700 text-white rounded-full text-sm font-medium"
-                        >
-                          {preference}
-                        </div>
-                      ))
-                    ) : (
-                      <p className="text-gray-500 text-sm italic">
-                        No preferences set. Click Edit to add some.
-                      </p>
-                    )}
-                  </div>
-                </div>
-
-                {/* Recommendations */}
-                <div>
-                  <h2 className="text-sm text-gray-600 mb-4 uppercase font-medium">RECOMMENDATIONS</h2>
-                  <div className="space-y-4">
-                    {isLoading ? (
-                      // Show loading skeletons while fetching recommendations
-                      <>
-                        <RecommendationCardSkeleton />
-                        <RecommendationCardSkeleton />
-                        <RecommendationCardSkeleton />
-                      </>
-                    ) : (
-                      // Show actual recommendations
-                      recommendations.map((item) => (
-                        <RecommendationCard
-                          key={item.id}
-                          name={item.name}
-                          imageUrl={item.imageUrl}
-                          onCook={() => console.log('Cook:', item.name)}
-                        />
-                      ))
-                    )}
-                  </div>
-                </div>
-              </div>
+                ))
+              ) : (
+                <p className="text-gray-500 text-sm italic">
+                  No preferences set. Click Edit to add some.
+                </p>
+              )}
             </div>
-          </>
+          </div>
+        </div>
+
+        {/* Recommendations - Only show when there are recommendations or loading */}
+        {(recommendations.length > 0 || isLoading) && (
+          <div>
+            <h2 className="text-sm text-gray-600 mb-4 uppercase font-medium">RECOMMENDATIONS</h2>
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+              {isLoading ? (
+                // Show loading skeletons while fetching recommendations
+                <>
+                  <RecommendationCardSkeleton />
+                  <RecommendationCardSkeleton />
+                  <RecommendationCardSkeleton />
+                </>
+              ) : (
+                // Show actual recommendations
+                recommendations.map((item) => (
+                  <RecommendationCard
+                    key={item.id}
+                    name={item.name}
+                    imageUrl={item.imageUrl}
+                    onCook={() => console.log('Cook:', item.name)}
+                  />
+                ))
+              )}
+            </div>
+          </div>
         )}
-        </aside>
-      </div>
+      </main>
 
       {/* Preferences Modal */}
       <PreferencesModal

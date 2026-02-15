@@ -68,32 +68,38 @@ export default function Dashboard() {
       setIsLoading(false);
     }
   };
-
   const handleCook = (item: Recommendation) => {
-    console.log(`Sending recipeTaskQueue to 100.71.232.77:9005 →`, item.recipeTaskQueue);
-    fetch('/api/send-task', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        recipeTaskQueue: item.recipeTaskQueue,
-        host: '100.71.232.77',
-        port: 9005,
-      }),
-    })
-      .then((res) => res.json())
-      .then((data) => {
-        if (data.error) {
-          console.error('Send failed:', data.error);
-          setToastMessage(`Failed to send recipe: ${data.error}`);
-        } else {
-          console.log('Task queue sent for:', item.name);
-        }
-      })
-      .catch((err) => {
-        console.error('Send error:', err);
-        setToastMessage('Failed to connect to cooking device');
-      });
-  };
+      console.log(`Sending recipe to 172.20.10.13:8080 →`, item.recipeTaskQueue);
+      
+      // Construct the payload to match your server's expected schema
+      const payload = {
+        message: `Cooking ${item.name}`,
+        recommendations: [
+          {
+            name: item.name,
+            imageUrl: item.imageUrl,
+            description: item.description,
+            recipeTaskQueue: item.recipeTaskQueue, // This is what the server extracts
+          }
+        ]
+      };
+      fetch('/api/send-task', { 
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        })
+        .then((res) => {
+          if (!res.ok) throw new Error(`HTTP ${res.status}`);
+          return res.json();
+        })
+        .then((data) => {
+          setToastMessage(`Sent recipe: ${item.name}`);
+        })
+        .catch((err) => {
+          console.error('Send error:', err);
+          setToastMessage(`Failed to send recipe: ${err.message}`);
+        });
+    };
 
   return (
     <div
@@ -128,9 +134,9 @@ export default function Dashboard() {
         </div>
 
         {/* Greeting */}
-        <p className={`mb-2 text-lg transition-colors ${
+        {/* <p className={`mb-2 text-lg transition-colors ${
           isDarkMode ? 'text-gray-400' : 'text-gray-600'
-        }`}>hello Allen</p>
+        }`}>HELLO ALLEN</p> */}
         <h1 className={`text-4xl font-semibold mb-8 transition-colors ${
           isDarkMode ? 'text-white' : 'text-gray-900'
         }`}>

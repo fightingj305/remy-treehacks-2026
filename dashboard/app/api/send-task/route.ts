@@ -1,40 +1,18 @@
-import { NextRequest, NextResponse } from 'next/server';
-import net from 'net';
+import { NextResponse } from 'next/server';
 
-export async function POST(req: NextRequest) {
-  const { recipeTaskQueue, host, port } = await req.json();
+export async function POST(request: Request) {
+  const body = await request.json();
 
-  if (!recipeTaskQueue || !host || !port) {
-    return NextResponse.json(
-      { error: 'Missing recipeTaskQueue, host, or port' },
-      { status: 400 }
-    );
+  try {
+    const response = await fetch('http://172.20.10.13:8080/api/chat', {
+      method: 'POST',
+      headers: { 'Content-Type': 'text/plain' },
+      body: JSON.stringify(body),
+    });
+
+    const data = await response.json();
+    return NextResponse.json(data);
+  } catch (error) {
+    return NextResponse.json({ error: 'Failed to reach API' }, { status: 500 });
   }
-
-  return new Promise<NextResponse>((resolve) => {
-    const client = new net.Socket();
-    const timeout = setTimeout(() => {
-      client.destroy();
-      resolve(NextResponse.json({ error: 'Connection timed out' }, { status: 504 }));
-    }, 5000);
-
-    client.connect(port, host, () => {
-      const payload = JSON.stringify(recipeTaskQueue);
-      const buf = Buffer.from(payload, 'utf-8');
-      const header = Buffer.alloc(4);
-      header.writeUInt32BE(buf.length);
-      client.write(Buffer.concat([header, buf]));
-      client.end();
-    });
-
-    client.on('close', () => {
-      clearTimeout(timeout);
-      resolve(NextResponse.json({ success: true }));
-    });
-
-    client.on('error', (err) => {
-      clearTimeout(timeout);
-      resolve(NextResponse.json({ error: err.message }, { status: 500 }));
-    });
-  });
 }

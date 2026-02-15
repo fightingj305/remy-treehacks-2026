@@ -135,9 +135,9 @@ export default function Dashboard() {
         </div>
 
         {/* Greeting */}
-        <p className={`mb-2 text-lg transition-colors ${
+        {/* <p className={`mb-2 text-lg transition-colors ${
           isDarkMode ? 'text-gray-400' : 'text-gray-600'
-        }`}>hello Allen</p>
+        }`}>HELLO ALLEN</p> */}
         <h1 className={`text-4xl font-semibold mb-8 transition-colors ${
           isDarkMode ? 'text-white' : 'text-gray-900'
         }`}>

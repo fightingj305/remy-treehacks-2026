@@ -7,22 +7,14 @@ import wave
 from elevenlabs.client import ElevenLabs
 import torch
 import numpy as np
-import torchaudio
+from scipy.signal import resample_poly
+from silero_vad import load_silero_vad, VADIterator
 
 load_dotenv()
 
-# --- Load Silero VAD model ---
+# --- Load Silero VAD model (ONNX — avoids torch.jit issues on RPi) ---
 print("Loading Silero VAD model...")
-model, utils = torch.hub.load(repo_or_dir='snakers4/silero-vad',
-                              model='silero_vad',
-                              force_reload=False)
-
-(get_speech_timestamps,
- save_audio,
- read_audio,
- VADIterator,
- collect_chunks) = utils
-
+model = load_silero_vad(onnx=True)
 print("Model loaded successfully!")
 
 # --- UDP configuration ---
@@ -49,11 +41,12 @@ vad_iterator = VADIterator(
     speech_pad_ms=SPEECH_PAD_MS
 )
 
-# --- Create resampler ---
-resampler = torchaudio.transforms.Resample(
-    orig_freq=RATE_RECEIVE,
-    new_freq=RATE_VAD
-)
+# --- Resampling helper (scipy replaces torchaudio) ---
+def resample_audio(audio_int16):
+    """Resample int16 numpy array from 44100 Hz to 16000 Hz using scipy."""
+    audio_float = audio_int16.astype(np.float32) / 32768.0
+    resampled = resample_poly(audio_float, up=160, down=441)
+    return torch.from_numpy(resampled.astype(np.float32))
 
 # --- Create ElevenLabs client ---
 elevenlabs = ElevenLabs(
@@ -142,14 +135,9 @@ try:
             chunk_original = packet_buffer_vad[:bytes_needed]
             packet_buffer_vad = packet_buffer_vad[bytes_needed:]
             
-            # Convert to numpy array
-            audio_44k = np.frombuffer(chunk_original, dtype=np.int16)
-            
-            # Convert to float tensor
-            audio_44k_float = torch.from_numpy(audio_44k.copy()).float() / 32768.0
-            
-            # Resample using torchaudio (more accurate)
-            audio_16k_float = resampler(audio_44k_float)
+            # Convert to numpy array and resample with scipy
+            audio_44k = np.frombuffer(chunk_original, dtype=np.int16).copy()
+            audio_16k_float = resample_audio(audio_44k)
             
             # Ensure exactly 512 samples by padding or trimming
             if len(audio_16k_float) < VAD_CHUNK_SAMPLES:

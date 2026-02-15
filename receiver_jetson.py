@@ -12,6 +12,8 @@ Usage:
 """
 
 import argparse
+import glob as globmod
+import os
 import socket
 import struct
 import threading
@@ -23,6 +25,46 @@ from tkinter import ttk
 import cv2
 import numpy as np
 from PIL import Image, ImageTk
+
+# ---------------------------------------------------------------------------
+# DS18B20 temperature sensor helpers
+# ---------------------------------------------------------------------------
+
+W1_DEVICES_PATH = "/sys/bus/w1/devices/"
+DS18B20_PREFIX = "28-"
+
+
+def find_sensor():
+    """Find the first DS18B20 device directory."""
+    devices = globmod.glob(os.path.join(W1_DEVICES_PATH, DS18B20_PREFIX + "*"))
+    if not devices:
+        return None
+    return devices[0]
+
+
+def read_temperature(device_path):
+    """Read temperature in Celsius from the sensor's sysfs file.
+
+    Returns the temperature as a float, or None on read failure.
+    """
+    slave_file = os.path.join(device_path, "w1_slave")
+    try:
+        with open(slave_file, "r") as f:
+            lines = f.readlines()
+    except OSError:
+        return None
+
+    # First line ends with YES if the CRC check passed
+    if len(lines) < 2 or "YES" not in lines[0]:
+        return None
+
+    # Second line contains t=<millidegrees>
+    idx = lines[1].find("t=")
+    if idx == -1:
+        return None
+
+    raw = int(lines[1][idx + 2:])
+    return raw / 1000.0
 
 # Display size for each panel — sized to fit 800x480 DSI display
 DISPLAY_W = 380
@@ -86,6 +128,16 @@ class ReceiverJetsonApp:
         self._vlm_max_messages = 50
         self._vlm_rendered_count = 0
 
+        # DS18B20 temperature state
+        self._temp_c = None
+        self._temp_lock = threading.Lock()
+        self._sensor_path = find_sensor()
+        if self._sensor_path:
+            print(f"DS18B20 sensor found: {os.path.basename(self._sensor_path)}")
+        else:
+            print("DS18B20 sensor not found — temperature display disabled")
+
+
         # Socket for forwarding to Jetson (created once, used by camera thread)
         self._fwd_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self._fwd_sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF,
@@ -101,6 +153,8 @@ class ReceiverJetsonApp:
         threading.Thread(target=self._camera_recv_loop, daemon=True).start()
         threading.Thread(target=self._jetson_recv_loop, daemon=True).start()
         threading.Thread(target=self._vlm_recv_loop, daemon=True).start()
+        if self._sensor_path:
+            threading.Thread(target=self._temp_poll_loop, daemon=True).start()
 
     def _camera_recv_loop(self):
         """Receive camera frames on --port, decode for display, forward to Jetson."""
@@ -209,6 +263,14 @@ class ReceiverJetsonApp:
 
         sock.close()
 
+    def _temp_poll_loop(self):
+        """Poll the DS18B20 sensor every second and store the latest reading."""
+        while self.running:
+            temp = read_temperature(self._sensor_path)
+            with self._temp_lock:
+                self._temp_c = temp
+            time.sleep(1)
+
     def _vlm_recv_loop(self):
         """Receive VLM analysis text from Jetson on --vlm-port."""
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -229,6 +291,12 @@ class ReceiverJetsonApp:
                 msg = data.decode("utf-8")
             except UnicodeDecodeError:
                 continue
+
+            # Attach the most recent temperature reading to the log entry
+            with self._temp_lock:
+                temp = self._temp_c
+            if temp is not None:
+                msg = f"{msg}  [Temp: {temp:.1f}°C / {temp * 9 / 5 + 32:.1f}°F]"
 
             with self._vlm_lock:
                 self._vlm_messages.append(msg)
@@ -306,6 +374,14 @@ class ReceiverJetsonApp:
         self.status_label = ttk.Label(status_frame, textvariable=self.status_var,
                                       style="Warn.TLabel")
         self.status_label.pack(side="left")
+
+        # Temperature display (always visible, right side of status bar)
+        self.temp_var = tk.StringVar(value="Temp: --")
+        style.configure("Temp.TLabel", font=("sans-serif", 9, "bold"),
+                         foreground="#f38ba8", background="#1e1e2e")
+        self.temp_label = ttk.Label(status_frame, textvariable=self.temp_var,
+                                    style="Temp.TLabel")
+        self.temp_label.pack(side="right")
 
         # -- Controls --
         controls = ttk.Frame(self.root)
@@ -386,6 +462,14 @@ class ReceiverJetsonApp:
                     f"{cam_str} | Jetson: waiting on port "
                     f"{self.args.return_port} ...")
                 self.status_label.configure(style="Warn.TLabel")
+
+        # Update temperature display
+        with self._temp_lock:
+            temp = self._temp_c
+        if temp is not None:
+            self.temp_var.set(f"Temp: {temp:.1f}°C / {temp * 9 / 5 + 32:.1f}°F")
+        elif self._sensor_path is None:
+            self.temp_var.set("Temp: no sensor")
 
         self.root.after(50, self._update_display)
 

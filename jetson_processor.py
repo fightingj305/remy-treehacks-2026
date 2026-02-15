@@ -32,18 +32,13 @@ MAX_UDP_PAYLOAD = 65503
 OLLAMA_URL = "http://localhost:11434/api/chat"
 OLLAMA_MODEL = "qwen3-vl:2b"
 OLLAMA_PROMPT = (
-    "Think concisely, but your output can be long and very descriptive. "
-    "Analyze this image and respond with ALL three of the following sections:\n\n"
-    "**Action:** Describe in vivid detail every action, movement, gesture, and activity "
-    "happening in the scene. Include body language, interactions between people or objects, "
-    "direction of motion, and any implied intent behind the actions.\n\n"
-    "**Tools:** List and describe every tool, instrument, device, utensil, equipment, "
-    "appliance, or functional object visible. Include their condition, position, how they "
-    "are being used or held, and any brand or type identifiers you can discern.\n\n"
-    "**Description of food:** Describe all food and beverages visible in thorough detail. "
-    "Include colors, textures, apparent temperatures, cooking methods, portion sizes, "
-    "plating style, garnishes, containers, and any identifiable ingredients or dishes. "
-    "If no food is visible, state 'No food visible' and describe what occupies that space instead."
+    "Be EXTREMELY concise. Use no more than 2 short paragraphs total. "
+    "No filler, no repetition.\n\n"
+    "Analyze this image and respond with ALL three sections:\n\n"
+    "**Action:** What is happening? Key actions and movements only.\n\n"
+    "**Tools:** List visible tools, devices, or equipment. One line each.\n\n"
+    "**Description of food:** Describe any food/beverages briefly (colors, type, cooking method). "
+    "If none, say 'No food visible.'"
 )
 VLM_INTERVAL_SEC = 5
 VLM_QUEUE_MAXSIZE = 3
@@ -132,6 +127,7 @@ def query_ollama(jpeg_bytes):
     payload = json.dumps({
         "model": OLLAMA_MODEL,
         "stream": False,
+        "options": {"num_ctx": 2048},
         "messages": [
             {
                 "role": "user",

@@ -6,7 +6,7 @@ export async function POST(request: Request) {
   try {
     const response = await fetch('http://172.20.10.13:8080/api/chat', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'text/plain' },
       body: JSON.stringify(body),
     });
 

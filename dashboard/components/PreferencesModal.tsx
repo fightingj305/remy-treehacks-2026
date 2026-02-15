@@ -75,7 +75,7 @@ export default function PreferencesModal({
         <div
           className="rounded-3xl shadow-2xl max-w-3xl w-full max-h-[90vh] overflow-y-auto pointer-events-auto transition-colors"
           style={{
-            backgroundColor: isDarkMode ? '#2f2f2a' : 'white',
+            backgroundColor: isDarkMode ? '#151514ff' : 'white',
           }}
           onClick={(e) => e.stopPropagation()}
         >
@@ -85,7 +85,7 @@ export default function PreferencesModal({
               isDarkMode ? 'border-gray-700' : 'border-gray-200'
             }`}
             style={{
-              backgroundColor: isDarkMode ? '#2f2f2a' : 'white',
+              backgroundColor: isDarkMode ? '#151514ff' : 'white',
             }}
           >
             <h2 className={`text-3xl font-semibold transition-colors ${
@@ -110,7 +110,7 @@ export default function PreferencesModal({
             {Object.entries(PREFERENCE_CATEGORIES).map(([category, options]) => (
               <div key={category}>
                 <h3 className={`text-lg mb-4 transition-colors ${
-                  isDarkMode ? 'text-amber-500' : 'text-amber-800'
+                  isDarkMode ? 'text-amber-600' : 'text-amber-800'
                 }`}>{category}</h3>
                 <div className="flex flex-wrap gap-3">
                   {options.map(option => (
@@ -121,7 +121,7 @@ export default function PreferencesModal({
                         selectedPreferences.includes(option)
                           ? 'bg-amber-700 text-white hover:bg-amber-800'
                           : isDarkMode
-                            ? 'bg-gray-700 text-gray-200 hover:bg-gray-600'
+                            ? 'bg-gray-800 text-gray-200 hover:bg-gray-700'
                             : 'bg-gray-100 text-gray-900 hover:bg-gray-200'
                       }`}
                     >
@@ -136,10 +136,10 @@ export default function PreferencesModal({
           {/* Footer */}
           <div
             className={`sticky bottom-0 border-t px-8 py-6 flex items-center justify-between rounded-b-3xl transition-colors ${
-              isDarkMode ? 'border-gray-700' : 'border-gray-200'
+              isDarkMode ? 'border-gray-800' : 'border-gray-200'
             }`}
             style={{
-              backgroundColor: isDarkMode ? '#2f2f2a' : 'white',
+              backgroundColor: isDarkMode ? '#151514ff' : 'white',
             }}
           >
             <button
@@ -165,7 +165,10 @@ export default function PreferencesModal({
               </button>
               <button
                 onClick={handleSave}
-                className="px-8 py-3 text-white rounded-full font-medium transition-colors bg-amber-700 hover:bg-amber-800"
+                className={`px-8 py-3 text-white rounded-full font-medium transition-colors ${
+                  isDarkMode
+                  ? 'bg-amber-700 text-gray-200 hover:bg-amber-800'
+                  : 'bg-amber-700 text-gray-200 hover:bg-amber-800'}`}
               >
                 Save
               </button>

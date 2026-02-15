@@ -23,3 +23,32 @@ body {
   color: var(--foreground);
   font-family: var(--font-dm-sans), sans-serif;
 }
+
+@keyframes slideInFromRight {
+  from {
+    transform: translateX(50px) translateY(-30px);
+    opacity: 0;
+  }
+  to {
+    transform: translateX(0) translateY(0);
+    opacity: 1;
+  }
+}
+
+.animate-slideInFromRight {
+  animation: slideInFromRight 0.5s ease-out 0.2s forwards;
+  opacity: 0;
+}
+
+@keyframes blink {
+  0%, 50% {
+    opacity: 1;
+  }
+  51%, 100% {
+    opacity: 0;
+  }
+}
+
+.animate-blink {
+  animation: blink 1s infinite;
+}

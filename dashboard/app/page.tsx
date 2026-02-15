@@ -141,7 +141,7 @@ export default function Dashboard() {
         {/* Logo */}
         <div className="mb-8 flex justify-center">
           <img
-            src="/images/logo.png"
+            src="/images/remy_logo.svg"
             alt="Logo"
             className="object-contain"
             style={{ height: '100px' }}
